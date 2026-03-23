@@ -32,29 +32,27 @@ _dddrun_core() {
   local pattern="$2"
   [ ! -f "$file" ] && { echo "❌ 找不到文件: $file"; return 1; }
 
-  # 1. 如果没有输入参数，进入 fzf 交互模式
   if [ -z "$pattern" ]; then
-    # --preview 参数让你在选择时能看到注释下的那行指令内容
+    # 提取时保留完整行内容以便后续 -F 匹配
     pattern=$(grep "^# " "$file" | sed 's/^# //' | fzf \
       --height 40% \
       --reverse \
       --border \
       --header "🎯 选择操作 (ESC 退出)" \
-      --preview "grep -A 1 {} $file | grep -v '^#' | grep -v '^$'" \
+      --preview "grep -F -A 1 {} $file | grep -v '^#' | grep -v '^$'" \
       --preview-window "bottom:2:wrap")
 
     [ -z "$pattern" ] && return 0
   fi
 
-  # 2. 提取指令 (使用已验证的 sed 强保护逻辑)
-  local cmd=$(grep -A 1 "$pattern" "$file" | grep -v "^#" | grep -v "^$" | tail -n 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  # 核心修复点：使用 grep -F 进行全文固定匹配
+  local cmd=$(grep -F -A 1 "$pattern" "$file" | grep -v "^#" | grep -v "^$" | tail -n 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
   if [ -z "$cmd" ]; then
     echo "❌ 未找到匹配 '$pattern' 的指令。"
     return 1
   fi
 
-  # 3. 执行
   echo -e "\033[1;32m🚀 执行中:\033[0m $cmd"
   /bin/bash -c "$cmd"
 }
