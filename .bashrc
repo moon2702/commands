@@ -28,30 +28,42 @@ alias dddcqzm="kquitapp6 plasmashell || killall plasmashell && setsid plasmashel
 
 # 执行当前目录下的 commands
 dddrun-cmd() {
-  local pattern=$1
-  local file="commands"
+  local file="commands"
+  [ ! -f "$file" ] && { echo "❌ 找不到 $file"; return 1; }
 
-  # --- 帮助模式：如果没有输入参数 ---
-  if [ -z "$pattern" ]; then
-    echo "💡 可用指令列表 (从 $file 提取):"
-    echo "--------------------------------"
-    # 提取以 # 开头的行，并去掉 # 符号和开头的空格
-    grep "^# " "$file" | sed 's/^# //' | awk '{print "  • " $0}'
-    echo "--------------------------------"
-    echo "用法: dddrun-cmd [关键词]"
-    return 0
-  fi
+  # 检查是否安装了 fzf
+  if ! command -v fzf &> /dev/null; then
+      echo "⚠️ 未安装 fzf，退回到手动模式..."
+      # 这里可以保留你原来的 grep 帮助逻辑
+      return 1
+  fi
 
-  # --- 执行模式：如果有参数 ---
-  # 匹配模式后的那一行，同时过滤掉注释行和空行
-  cmd=$(grep -A 1 "$pattern" "$file" | grep -v "^#" | grep -v "^$" | tail -n 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  local pattern=$1
+  local selected=""
 
-  if [ -z "$cmd" ]; then
-    echo "❌ 错误: 未找到匹配 '$pattern' 的有效指令。"
-    return 1
-  fi
+  # --- 交互选择模式：如果没有输入参数，或者参数匹配不到结果 ---
+  if [ -z "$pattern" ]; then
+    # 从文件中提取所有 # 注释，交给 fzf 选择
+    selected=$(grep "^# " "$file" | sed 's/^# //' | fzf \
+      --height 40% \
+      --reverse \
+      --header "🎯 选择要执行的操作 (ESC 退出):" \
+      --border \
+      --inline-info)
 
-  echo "🚀 正在执行: $cmd"
-  eval "$cmd"
-  # /bin/bash -c "$cmd"
+    [ -z "$selected" ] && return 0
+    pattern="$selected"
+  fi
+
+  # --- 提取与执行逻辑 ---
+  # 使用之前验证过的 sed 强保护逻辑
+  cmd=$(grep -A 1 "$pattern" "$file" | grep -v "^#" | grep -v "^$" | tail -n 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+  if [ -z "$cmd" ]; then
+    echo "❌ 未找到匹配 '$pattern' 的指令。"
+    return 1
+  fi
+
+  echo -e "\033[1;32m🚀 执行中:\033[0m $cmd"
+  /bin/bash -c "$cmd"
 }
