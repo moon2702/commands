@@ -26,44 +26,47 @@ alias dddtoolss="source /home/bowl/Code/ShellTools/script_dir/system_menu.sh"
 # 桌面黑屏，需重启
 alias dddcqzm="kquitapp6 plasmashell || killall plasmashell && setsid plasmashell > /dev/null 2>&1 &"
 
-# 执行当前目录下的 commands
-dddrun-cmd() {
-  local file="commands"
-  [ ! -f "$file" ] && { echo "❌ 找不到 $file"; return 1; }
+# 核心通用函数 (内部使用)
+_dddrun_core() {
+  local file="$1"
+  local pattern="$2"
+  [ ! -f "$file" ] && { echo "❌ 找不到文件: $file"; return 1; }
 
-  # 检查是否安装了 fzf
-  if ! command -v fzf &> /dev/null; then
-      echo "⚠️ 未安装 fzf，退回到手动模式..."
-      # 这里可以保留你原来的 grep 帮助逻辑
-      return 1
-  fi
-
-  local pattern=$1
-  local selected=""
-
-  # --- 交互选择模式：如果没有输入参数，或者参数匹配不到结果 ---
+  # 1. 如果没有输入参数，进入 fzf 交互模式
   if [ -z "$pattern" ]; then
-    # 从文件中提取所有 # 注释，交给 fzf 选择
-    selected=$(grep "^# " "$file" | sed 's/^# //' | fzf \
+    # --preview 参数让你在选择时能看到注释下的那行指令内容
+    pattern=$(grep "^# " "$file" | sed 's/^# //' | fzf \
       --height 40% \
       --reverse \
-      --header "🎯 选择要执行的操作 (ESC 退出):" \
       --border \
-      --inline-info)
+      --header "🎯 选择操作 (ESC 退出)" \
+      --preview "grep -A 1 {} $file | grep -v '^#' | grep -v '^$'" \
+      --preview-window "bottom:2:wrap")
 
-    [ -z "$selected" ] && return 0
-    pattern="$selected"
+    [ -z "$pattern" ] && return 0
   fi
 
-  # --- 提取与执行逻辑 ---
-  # 使用之前验证过的 sed 强保护逻辑
-  cmd=$(grep -A 1 "$pattern" "$file" | grep -v "^#" | grep -v "^$" | tail -n 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  # 2. 提取指令 (使用已验证的 sed 强保护逻辑)
+  local cmd=$(grep -A 1 "$pattern" "$file" | grep -v "^#" | grep -v "^$" | tail -n 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
   if [ -z "$cmd" ]; then
     echo "❌ 未找到匹配 '$pattern' 的指令。"
     return 1
   fi
 
+  # 3. 执行
   echo -e "\033[1;32m🚀 执行中:\033[0m $cmd"
   /bin/bash -c "$cmd"
+}
+
+# --- 用户调用接口 ---
+
+# 执行当前目录下的 commands
+dddrun-cmd() {
+  _dddrun_core "commands" "$1"
+}
+
+# 执行全局配置 ~/.commands
+dddrun-global() {
+  _dddrun_core "$HOME/.commands" "$1"
 }
