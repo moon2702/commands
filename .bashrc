@@ -26,33 +26,54 @@ alias dddtoolss="source /home/bowl/Code/ShellTools/script_dir/system_menu.sh"
 # 桌面黑屏，需重启
 alias dddcqzm="kquitapp6 plasmashell || killall plasmashell && setsid plasmashell > /dev/null 2>&1 &"
 
+# 1. 定义一个独立的提取函数 (Internal helper)
+_dddrun_extract_cmd() {
+  local target_file="$1"
+  local search_pattern="# $2"
+
+  # 使用 awk 的最稳健写法：不依赖外部转义
+  awk -v p="$search_pattern" '
+    index($0, p) == 1 { f=1; next }
+    f && /^[[:space:]]*$/ { exit }
+    f { print }
+  ' "$target_file"
+}
+
 # 核心通用函数 (内部使用)
 _dddrun_core() {
   local file="$1"
   local pattern="$2"
   [ ! -f "$file" ] && { echo "❌ 找不到文件: $file"; return 1; }
 
+  local cmd=$( (cat "$file"; echo "") | awk -v p="# $pattern" '
+    index($0, p) == 1 { flag=1; next }
+    flag && /^[[:space:]]*$/ { exit }
+    flag { print }
+  ')
+
+  # 1. 如果没有输入参数，进入 fzf 交互模式
   if [ -z "$pattern" ]; then
-    # 提取时保留完整行内容以便后续 -F 匹配
+    # --preview 参数让你在选择时能看到注释下的那行指令内容
     pattern=$(grep "^# " "$file" | sed 's/^# //' | fzf \
       --height 40% \
       --reverse \
       --border \
       --header "🎯 选择操作 (ESC 退出)" \
-      --preview "grep -F -A 1 {} $file | grep -v '^#' | grep -v '^$'" \
-      --preview-window "bottom:2:wrap")
+      --preview "$(declare -f _dddrun_extract_cmd); _dddrun_extract_cmd $file {}" \
+      --preview-window "bottom:3:wrap")
 
     [ -z "$pattern" ] && return 0
   fi
 
-  # 核心修复点：使用 grep -F 进行全文固定匹配
-  local cmd=$(grep -F -A 1 "$pattern" "$file" | grep -v "^#" | grep -v "^$" | tail -n 1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  # 2. 提取指令 (使用已验证的 sed 强保护逻辑)
+  local cmd=$(_dddrun_extract_cmd "$file" "$pattern")
 
   if [ -z "$cmd" ]; then
     echo "❌ 未找到匹配 '$pattern' 的指令。"
     return 1
   fi
 
+  # 3. 执行
   echo -e "\033[1;32m🚀 执行中:\033[0m $cmd"
   /bin/bash -c "$cmd"
 }
