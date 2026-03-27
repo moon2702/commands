@@ -34,20 +34,40 @@ _dddrun_extract_cmd() {
   # 使用 awk 的最稳健写法：不依赖外部转义
   awk -v p="$search_pattern" '
     index($0, p) == 1 { f=1; next }
-    f && /^[[:space:]]*$/ { exit }
+    f && (/^[[:space:]]*$/ || /^# /) { exit }
     f { print }
   ' "$target_file"
 }
 
+DDD_HIST_FILE="$HOME/.dddrun_history"
+
 # 核心通用函数 (内部使用)
 _dddrun_core() {
   local file="$1"
-  local pattern="$2"
+  local input_arg="$2"
+  local pattern=""
   [ ! -f "$file" ] && { echo "❌ 找不到文件: $file"; return 1; }
 
-  # ---- 提取当前文件内的 [INIT] 块 ----
-  # 先抓取头部的 [INIT] 定义
-  local init_content=$(_dddrun_extract_cmd "$file" "[INIT]")
+  case "$input_arg" in
+    "-e")
+      vim "$file"
+      return 0
+      ;;
+    "-l")
+      if [ -f "$DDD_HIST_FILE" ]; then
+        # 读取最后一次该文件相关的历史（如果是 global 就读 global 的，cmd 就读 cmd 的）
+        # 这里我们简单处理，读取全局最后一条记录
+        pattern=$(tail -n 1 "$DDD_HIST_FILE")
+        echo -e "\033[1;33m🕒 自动加载最近一次命令: \033[0m$pattern"
+      else
+        echo "❌ 暂无执行历史。"
+        return 1
+      fi
+      ;;
+    *)
+      pattern="$input_arg"
+      ;;
+  esac
 
   # ---- 交互模式 ----
   if [ -z "$pattern" ]; then
@@ -56,6 +76,7 @@ _dddrun_core() {
       --height 40% \
       --reverse \
       --border \
+      --query "$input_arg" \
       --header "🎯 选择操作 (ESC 退出)" \
       --preview "$(declare -f _dddrun_extract_cmd); _dddrun_extract_cmd $file {}" \
       --preview-window "bottom:3:wrap")
@@ -63,6 +84,10 @@ _dddrun_core() {
     [ -z "$pattern" ] && return 0
   fi
 
+  echo "${file} and ${pattern}"
+
+  # ---- 提取 [INIT] 块 ----
+  local init_content=$(_dddrun_extract_cmd "$file" "[INIT]")
   # ---- 正式提取命令 ----
   local cmd=$(_dddrun_extract_cmd "$file" "$pattern")
 
@@ -78,7 +103,14 @@ _dddrun_core() {
 
   # 将 [INIT] 与抓取到的命令拼接，交给子 Bash 执行
   # 如此 cmd 可以直接调用 [INIT] 中的定义
-  /bin/bash -c "${init_content}; ${cmd}"
+  final_cmd="${init_content}${init_content:+;}${cmd}"
+
+  # 执行 + 记录一条历史
+  if /bin/bash -c "$final_cmd"; then
+      touch "$DDD_HIST_FILE"
+      sed -i "/^$pattern$/d" "$DDD_HIST_FILE"
+      echo "$pattern" >> "$DDD_HIST_FILE"
+  fi
 }
 
 # --- 用户调用接口 ---
