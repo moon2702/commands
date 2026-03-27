@@ -26,7 +26,7 @@ alias dddtoolss="source /home/bowl/Code/ShellTools/script_dir/system_menu.sh"
 # 桌面黑屏，需重启
 alias dddcqzm="kquitapp6 plasmashell || killall plasmashell && setsid plasmashell > /dev/null 2>&1 &"
 
-# 1. 定义一个独立的提取函数 (Internal helper)
+# 一个独立的提取函数 (Internal helper)
 _dddrun_extract_cmd() {
   local target_file="$1"
   local search_pattern="# $2"
@@ -45,16 +45,14 @@ _dddrun_core() {
   local pattern="$2"
   [ ! -f "$file" ] && { echo "❌ 找不到文件: $file"; return 1; }
 
-  local cmd=$( (cat "$file"; echo "") | awk -v p="# $pattern" '
-    index($0, p) == 1 { flag=1; next }
-    flag && /^[[:space:]]*$/ { exit }
-    flag { print }
-  ')
+  # ---- 提取当前文件内的 [INIT] 块 ----
+  # 先抓取头部的 [INIT] 定义
+  local init_content=$(_dddrun_extract_cmd "$file" "[INIT]")
 
-  # 1. 如果没有输入参数，进入 fzf 交互模式
+  # ---- 交互模式 ----
   if [ -z "$pattern" ]; then
-    # --preview 参数让你在选择时能看到注释下的那行指令内容
-    pattern=$(grep "^# " "$file" | sed 's/^# //' | fzf \
+    # --preview 参数 实现命令预览
+    pattern=$(grep "^# " "$file" | grep -v "\[INIT\]" | sed 's/^# //' | fzf \
       --height 40% \
       --reverse \
       --border \
@@ -65,7 +63,7 @@ _dddrun_core() {
     [ -z "$pattern" ] && return 0
   fi
 
-  # 2. 提取指令 (使用已验证的 sed 强保护逻辑)
+  # ---- 正式提取命令 ----
   local cmd=$(_dddrun_extract_cmd "$file" "$pattern")
 
   if [ -z "$cmd" ]; then
@@ -73,9 +71,14 @@ _dddrun_core() {
     return 1
   fi
 
-  # 3. 执行
-  echo -e "\033[1;32m🚀 执行中:\033[0m $cmd"
-  /bin/bash -c "$cmd"
+  # ---- 最终执行 ----
+  echo -e "\033[1;32m🚀 执行中:\033[0m"
+  echo "$cmd"
+  echo "-----------------------------------------------"
+
+  # 将 [INIT] 与抓取到的命令拼接，交给子 Bash 执行
+  # 如此 cmd 可以直接调用 [INIT] 中的定义
+  /bin/bash -c "${init_content}; ${cmd}"
 }
 
 # --- 用户调用接口 ---
