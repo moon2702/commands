@@ -26,7 +26,7 @@ alias dddtoolss="source /home/bowl/Code/ShellTools/script_dir/system_menu.sh"
 # 桌面黑屏，需重启
 alias dddcqzm="kquitapp6 plasmashell || killall plasmashell && setsid plasmashell > /dev/null 2>&1 &"
 
-# 一个独立的提取函数 (Internal helper)
+# 块提取函数 (Internal helper)
 _dddrun_extract_cmd() {
   local target_file="$1"
   local search_pattern="# $2"
@@ -46,11 +46,12 @@ _dddrun_core() {
   local pattern=""
   [ ! -f "$file" ] && { echo "❌ 找不到文件: $file"; return 1; }
 
-  # ---- 提取历史记录 ----
-  # 从 [HISTORY_COMMANDS] 到文件结尾
-  local history_cmds=$(awk '/^# \[HISTORY_COMMANDS\]/ {f=1; next} f {if(NF) print}' "$file" | tac)
+  # ---- 提取相关内容 ----
+  local init_content=$(_dddrun_extract_cmd "$file" "[INIT]")
+  local all_configs=$(_dddrun_extract_cmd "$file" "[CONFIGS]")
+  local history_cmds=$(_dddrun_extract_cmd "$file" "[HISTORY_COMMANDS]" | tac)
 
-case "$input_arg" in
+  case "$input_arg" in
     "-h")
       echo -e "\033[1;34m📖 dddrun 使用帮助:\033[0m"
       echo "  dddrun-cmd [args]    执行当前目录下的 commands"
@@ -62,11 +63,36 @@ case "$input_arg" in
       echo "    -e         使用 vim 编辑当前的配置文件"
       echo "    -c         清空当前配置文件的 [HISTORY_COMMANDS] 区块"
       echo "    -h         显示本帮助信息"
+      echo "    -f         刷新 [CONFIGS] 块"
       echo "    [string]   搜索包含该字符串的命令 并进入 fzf 交互模式"
       echo "-----------------------------------------------"
-      echo "  文件结构建议: 包含 #[INIT] 函数定义块 和 #[HISTORY_COMMANDS] 结尾块"
-      return 0
-      ;;
+      echo "  文件结构建议: 包含 [INIT] [CONFIGS] [HISTORY_COMMANDS] 结构块"
+      return 0 ;;
+    "-f")
+      echo "🔄 正在重新生成 [CONFIGS] 索引..."
+      # 1. 扫描所有标题，排除内置块
+      local new_configs=$(grep "^# " "$file" | grep -vE "\[INIT\]|\[CONFIGS\]|\[HISTORY_COMMANDS\]" | sed 's/^# //')
+
+      # 2. 定位 [CONFIGS] 块的位置
+      local start_line=$(grep -n "^# \[CONFIGS\]" "$file" | cut -d: -f1)
+      [ -z "$start_line" ] && { echo "❌ 未找到 # [CONFIGS] 标记"; return 1; }
+      local next_block_line=$(tail -n +$((start_line + 1)) "$file" | grep -n "^# \[" | head -n 1 | cut -d: -f1)
+
+      # 3. 清空旧内容并注入新内容
+      if [ -n "$next_block_line" ]; then
+          # 计算在原文件中的实际行号
+          local end_line=$((start_line + next_block_line - 1))
+          # 只删除 start_line+1 到 end_line-1 之间的内容 (保留下一个块的标题)
+          # 如果中间紧贴着，sed 实际上什么都不删，这很安全
+          [ $end_line -gt $((start_line + 1)) ] && sed -i "$((start_line + 1)),$((end_line - 1))d" "$file"
+      else
+          # 如果后面没有其他块了，就删到文件末尾
+          sed -i "$((start_line + 1)),\$d" "$file"
+      fi
+      # 在标记行后插入新索引
+      echo "$new_configs" | sed -i "${start_line}r /dev/stdin" "$file"
+      echo "✅ 索引已刷新。"
+      return 0 ;;
     "-e") vim "$file"; return 0 ;;
     "-c")
       sed -i '/^# \[HISTORY_COMMANDS\]/q' "$file"
@@ -80,9 +106,10 @@ case "$input_arg" in
 
   # ---- 交互模式 ----
   if [ -z "$pattern" ]; then
-    local all_cmds=$(grep "^# " "$file" | grep -v "\[INIT\]" | grep -v "\[HISTORY_COMMANDS\]" | sed 's/^# //')
+    # 如果 CONFIGS 块是空的，提醒用户刷新
+    [ -z "$all_configs" ] && { echo -e "\033[1;31m🛑 [CONFIGS] 索引为空！请先使用 -f 刷新\033[0m"; return 1; }
     # --preview 参数 实现命令预览
-    pattern=$({ echo "$history_cmds"; echo "$all_cmds"; } | awk 'NF && !vis[$0]++' | fzf \
+    pattern=$({ echo "$history_cmds"; echo "$all_configs"; } | awk 'NF && !vis[$0]++' | fzf \
       --height 40% --reverse --border --query "$input_arg" \
       --header "🎯 选择操作 (ESC 退出)" --preview-window "bottom:3:wrap" \
       --preview "$(declare -f _dddrun_extract_cmd); _dddrun_extract_cmd $file {}")
@@ -92,8 +119,6 @@ case "$input_arg" in
 
   echo "${file} and ${pattern}"
 
-  # ---- 提取 [INIT] 块 ----
-  local init_content=$(_dddrun_extract_cmd "$file" "[INIT]")
   # ---- 正式提取命令 ----
   local cmd=$(_dddrun_extract_cmd "$file" "$pattern")
 
