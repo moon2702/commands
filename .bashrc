@@ -49,8 +49,10 @@ _dddrun_core() {
   [ ! -f "$file" ] && { echo "❌ 找不到文件: $file"; return 1; }
 
   case "$input_arg" in
-    "-e")
-      vim "$file"
+    "-e") vim "$file"; return 0 ;;
+    "-c")
+      > "$DDD_HIST_FILE"
+      echo "🧹 历史记录已清空"
       return 0
       ;;
     "-l")
@@ -69,17 +71,17 @@ _dddrun_core() {
       ;;
   esac
 
+  local all_cmds=$(grep "^# " "$file" | grep -v "\[INIT\]" | sed 's/^# //')
+  local history_cmds=""
+  [ -f "$DDD_HIST_FILE" ] && history_cmds=$(tac "$DDD_HIST_FILE")
+
   # ---- 交互模式 ----
   if [ -z "$pattern" ]; then
     # --preview 参数 实现命令预览
-    pattern=$(grep "^# " "$file" | grep -v "\[INIT\]" | sed 's/^# //' | fzf \
-      --height 40% \
-      --reverse \
-      --border \
-      --query "$input_arg" \
-      --header "🎯 选择操作 (ESC 退出)" \
-      --preview "$(declare -f _dddrun_extract_cmd); _dddrun_extract_cmd $file {}" \
-      --preview-window "bottom:3:wrap")
+    pattern=$({ echo "$history_cmds"; echo "$all_cmds"; } | awk 'NF && !vis[$0]++' | fzf \
+      --height 40% --reverse --border --query "$input_arg" \
+      --header "🎯 选择操作 (ESC 退出)" --preview-window "bottom:3:wrap" \
+      --preview "$(declare -f _dddrun_extract_cmd); _dddrun_extract_cmd $file {}")
 
     [ -z "$pattern" ] && return 0
   fi
