@@ -33,39 +33,21 @@ _dddrun_block_locate() {
 
   # 使用 awk 严格匹配字符串，完全无视正则特殊字符
   read -r s e exists < <(awk -v t="$tag" '
-    {
-        # 去掉当前行末尾的空白字符进行比较
-        line = $0;
-        sub(/[[:space:]]*$/, "", line);
-
-        # 1. 寻找起始行 (完全匹配)
-        if (line == t) {
-            s = NR;
-            f = 1;
-            next;
-        }
-
-        # 2. 寻找结束行 (遇到下一个 # [ 停止)
-        if (f && index($0, "# [") == 1) {
-            e = NR - 1;
-            exit;
-        }
-    }
-    END {
-        if (f) {
-            if (e == 0) e = NR;
-            print s, e, 1;
-        } else {
-            print "0 0 0";
-        }
-    }
+      $0 == t { s=NR; f=1; next }
+      f && /^# \[/ { e=NR-1; exit }
+      END {
+          if (!f) print 0,0,0
+          else print s, (e?e:NR), 1
+      }
   ' "$file")
+
   echo "$s $e $exists"
 }
 
 # 块提取函数 (Internal helper)
 _dddrun_block_get() {
-  local file="$1" tag_name="$2"
+  local file="$1"
+  local tag_name="$2"
   read -r s e exists < <(_dddrun_block_locate "$file" "$tag_name")
 
   [ "$exists" -eq 1 ] && [ "$e" -gt "$s" ] && sed -n "$((s + 1)),${e}p" "$file" | awk 'NF'
@@ -73,7 +55,8 @@ _dddrun_block_get() {
 
 # 块更新函数
 _dddrun_block_set() {
-  local file="$1" tag_name="$2"
+  local file="$1"
+  local tag_name="$2"
   local new_content=$(cat)
   read -r s e exists < <(_dddrun_block_locate "$file" "$tag_name")
 
@@ -84,15 +67,25 @@ _dddrun_block_set() {
     { echo "$new_content"; echo ""; } | sed -i "${s}r /dev/stdin" "$file"
   else
     # 没找到就追加到末尾
-    echo -e "\n# [$tag_name]\n$new_content\n" >> "$file"
+    echo -e "\n# $tag_name\n$new_content\n" >> "$file"
   fi
 }
 
+declare -A BLOCKS=(
+  [1]="[COMMANDS_INIT]"
+  [2]="[COMMANDS_CONFIGS]"
+  [3]="[COMMANDS_HISTORY]"
+)
+
 # 定义数据获取逻辑
 _get_fresh_configs() {
-    grep "^# \[" "$file" | \
-    grep -vE "\[INIT\]|\[CONFIGS\]|\[HISTORY_COMMANDS\]" | \
-    sed 's/^# //'
+  local block_list=$(printf "%s\n" "${BLOCKS[@]}")
+
+  # 使用 -F (固定字符串) 和 -v (排除)
+  # -f /dev/stdin 表示从标准输入读取“排除名单”
+  grep "^# \[" "$file" | \
+  grep -vFf <(echo "$block_list") | \
+  sed 's/^# //'
 }
 
 # 核心通用函数 (内部使用)
@@ -103,9 +96,9 @@ _dddrun_core() {
   [ ! -f "$file" ] && { echo "❌ 找不到文件: $file"; return 1; }
 
   # ---- 提取相关内容 ----
-  local init_content=$(_dddrun_block_get "$file" "[INIT]")
-  local all_configs=$(_dddrun_block_get "$file" "[CONFIGS]")
-  local history_cmds=$(_dddrun_block_get "$file" "[HISTORY_COMMANDS]" | tac)
+  local init_content=$(_dddrun_block_get "$file" "${BLOCKS[1]}")
+  local all_configs=$(_dddrun_block_get "$file" "${BLOCKS[2]}")
+  local history_cmds=$(_dddrun_block_get "$file" "${BLOCKS[3]}")
 
   case "$input_arg" in
     "-h")
@@ -117,27 +110,27 @@ _dddrun_core() {
       echo "    (空)       进入 fzf 交互模式 (智能置顶历史记录)"
       echo "    -l         快速执行最后一次成功运行的命令"
       echo "    -e         使用 vim 编辑当前的配置文件"
-      echo "    -c         清空当前配置文件的 [HISTORY_COMMANDS] 区块"
+      echo "    -c         清空当前配置文件的 ${BLOCKS[3]} 区块"
       echo "    -h         显示本帮助信息"
-      echo "    -f         刷新 [CONFIGS] 块"
+      echo "    -f         刷新 ${BLOCKS[2]} 块"
       echo "    [string]   搜索包含该字符串的命令 并进入 fzf 交互模式"
       echo "-----------------------------------------------"
-      echo "  文件结构建议: 包含 [INIT] [CONFIGS] [HISTORY_COMMANDS] 结构块"
+      echo "  文件结构建议: 包含 ${BLOCKS[1]} ${BLOCKS[2]} ${BLOCKS[3]} 结构块"
       return 0 ;;
     "-f")
-      echo "🔄 正在同步 [CONFIGS] 索引..."
+      echo "🔄 正在同步 ${BLOCKS[2]} 索引..."
       # 扫描块标题
       local new_configs=$(_get_fresh_configs)
       [ -z "$new_configs" ] && { echo "⚠️ 未在文件中发现任何有效的业务指令块。"; return 1; }
       # 更新 [CONFIGS] 块
-      echo "$new_configs" | _dddrun_block_set "$file" "[CONFIGS]"
+      echo "$new_configs" | _dddrun_block_set "$file" "${BLOCKS[2]}"
       echo "✅ 索引已刷新 ($(echo "$new_configs" | wc -l) 条记录)。"
       return 0 ;;
     "-e") vim "$file"; return 0 ;;
     "-c")
       # 将空内容传入块更新函数，实现“只清空该块、保留标签”的效果
-      echo "" | _dddrun_block_set "$file" "[HISTORY_COMMANDS]"
-      echo "🧹 [HISTORY_COMMANDS] 块已清空"
+      echo "" | _dddrun_block_set "$file" "${BLOCKS[3]}"
+      echo "🧹 ${BLOCKS[3]} 块已清空"
       return 0
       ;;
     "-l")
@@ -150,7 +143,7 @@ _dddrun_core() {
   # ---- 交互模式 ----
   if [ -z "$pattern" ]; then
     # 如果 CONFIGS 块是空的，提醒用户刷新
-    [ -z "$all_configs" ] && { echo -e "\033[1;31m🛑 [CONFIGS] 索引为空！请先使用 -f 刷新\033[0m"; return 1; }
+    [ -z "$all_configs" ] && { echo -e "\033[1;31m🛑 ${BLOCKS[2]} 索引为空！请先使用 -f 刷新\033[0m"; return 1; }
     # --preview 参数 实现命令预览
     pattern=$({ echo "$history_cmds"; echo "$all_configs"; } | awk 'NF && !vis[$0]++' | fzf \
       --height 80% --reverse --border --query "$input_arg" \
@@ -185,9 +178,9 @@ _dddrun_core() {
   # 执行 + 记录一条历史
   if /bin/bash -c "$final_cmd"; then
     if [ $? -eq 0 ]; then
-      local old_history=$(_dddrun_block_get "$file" "[HISTORY_COMMANDS]")
-      local new_history=$( (echo "$old_history"; echo "$pattern") | awk 'NF && !vis[$0]++' )
-      echo "$new_history" | _dddrun_block_set "$file" "[HISTORY_COMMANDS]"
+      local old_history=$(_dddrun_block_get "$file" "${BLOCKS[3]}")
+      local new_history=$( (echo "$pattern"; echo "$old_history") | awk 'NF && !vis[$0]++' )
+      echo "$new_history" | _dddrun_block_set "$file" "${BLOCKS[3]}"
     fi
   fi
 }
