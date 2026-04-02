@@ -26,6 +26,30 @@ alias dddtoolss="source /home/bowl/Code/ShellTools/script_dir/system_menu.sh"
 # 桌面黑屏，需重启
 alias dddcqzm="kquitapp6 plasmashell || killall plasmashell && setsid plasmashell > /dev/null 2>&1 &"
 
+declare -A COLORS=(
+    ["red"]="\033[1;31m"
+    ["green"]="\033[1;32m"
+    ["yellow"]="\033[1;33m"
+    ["blue"]="\033[1;34m"
+    ["purple"]="\033[1;35m"
+    ["cyan"]="\033[1;36m"
+    ["white"]="\033[1;37m"
+    ["reset"]="\033[0m"
+)
+printf_color() {
+    local color_name=$(echo "$1" | tr '[:upper:]' '[:lower:]') # 转小写
+    local message="$2"
+    local color_code="${COLORS[$color_name]}"
+
+    # 如果颜色不存在，默认用白色
+    if [[ -z "$color_code" ]]; then
+        color_code="${COLORS["white"]}"
+    fi
+
+    # 打印颜色内容 + 自动重置颜色
+    echo -e "${color_code}${message}${COLORS["reset"]}"
+}
+
 # 块定位函数
 _dddrun_block_locate() {
   local file="$1"
@@ -102,7 +126,7 @@ _dddrun_core() {
 
   case "$input_arg" in
     "-h")
-      echo -e "\033[1;34m📖 dddrun 使用帮助:\033[0m"
+      printf_color "blue" "📖 dddrun 使用帮助:"
       echo "  dddrun-cmd [args]    执行当前目录下的 commands"
       echo "  dddrun-global [args] 执行全局 ~/.commands"
       echo "-----------------------------------------------"
@@ -131,19 +155,18 @@ _dddrun_core() {
       # 将空内容传入块更新函数，实现“只清空该块、保留标签”的效果
       echo "" | _dddrun_block_set "$file" "${BLOCKS[3]}"
       echo "🧹 ${BLOCKS[3]} 块已清空"
-      return 0
-      ;;
+      return 0 ;;
     "-l")
       pattern=$(echo "$history_cmds" | head -n 1)
       if [ -z "$pattern" ]; then echo "❌ 暂无执行历史"; return 1; fi
-      echo -e "\033[1;33m🕒 自动加载最近一次命令: \033[0m$pattern" ;;
+      echo -n "$(printf_color "yellow" "🕒 自动加载最近一次命令: ")"; echo "$pattern" ;;
     *) ;;
   esac
 
   # ---- 交互模式 ----
   if [ -z "$pattern" ]; then
     # 如果 CONFIGS 块是空的，提醒用户刷新
-    [ -z "$all_configs" ] && { echo -e "\033[1;31m🛑 ${BLOCKS[2]} 索引为空！请先使用 -f 刷新\033[0m"; return 1; }
+    [ -z "$all_configs" ] && { printf_color "red" "🛑 ${BLOCKS[2]} 索引为空！请先使用 -f 刷新"; return 1; }
     # --preview 参数 实现命令预览
     pattern=$({ echo "$history_cmds"; echo "$all_configs"; } | awk 'NF && !vis[$0]++' | fzf \
       --height 80% --reverse --border --query "$input_arg" \
@@ -167,7 +190,7 @@ _dddrun_core() {
   [ -z "$cmd" ] && { echo "❌ 未找到匹配 '$pattern' 的指令。"; return 1; }
 
   # ---- 最终执行 ----
-  echo -e "\033[1;32m🚀 执行中:\033[0m"
+  printf_color "green" "🚀 执行中:"
   echo "$cmd"
   echo "-----------------------------------------------"
 
