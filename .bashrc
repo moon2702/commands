@@ -48,49 +48,6 @@ printf_color() {
 
   echo -e "${color_code}${message}${COLORS["reset"]}"
 }
-# 用法1: 将需要逐行执行的块，使用 ONE_BY_ONE <<'EOF' 包裹
-# ONE_BY_ONE <<'EOF'
-#   uptime
-# EOF
-# 用法2: echo "$cmd" | ONE_BY_ONE
-ONE_BY_ONE() {
-  local init_arg="$1"
-  local TERMINAL="/dev/tty"
-  local ALWAYS_YES=false
-  [[ -n "$init_arg" ]] && eval "$init_arg"
-  # 预询问：是否全部自动执行
-  echo -n "$(printf_color "cyan" "多行是否全部自动执行 (All Yes)? [y/N]: ")"
-  read -n 1 -t 10 pre_opt < "$TERMINAL"
-  echo
-  [[ "$pre_opt" =~ [yY] ]] && ALWAYS_YES=true
-  # 从标准输入（stdin）读取
-  while IFS= read -r cmd; do
-    [[ -z "${cmd// }" || "$cmd" =~ ^# ]] && continue
-
-    # 直接运行并跳过交互
-    if [ "$ALWAYS_YES" = true ]; then
-      printf_color "green" "[自动执行中...]"
-      eval "$cmd"
-      continue
-    fi
-
-    printf_color "blue" "\n[即将执行] $cmd"
-    while true; do
-      # 需从 /dev/tty 获取交互，因为 stdin 正在被读取命令
-      read -n 1 -p "Action: [Y]Run | [S]Skip | [N]Abort: " opt < "$TERMINAL"
-      echo
-      case "$opt" in
-        [yY]) printf_color "green" "[正在执行...]"
-              eval "$cmd"; break ;;
-        [sS]) printf_color "yellow" "[跳过执行...]"
-              break ;;
-        [nN]) printf_color "red" "[退出脚本...]"
-              exit 0 ;;
-        *) printf_color "red" "无效的输入，请输入 Y/S/N" ;;
-      esac
-    done
-  done
-}
 
 # 块定位函数
 _dddrun_block_locate() {
@@ -154,6 +111,119 @@ _get_fresh_configs() {
   sed 's/^# //'
 }
 
+# 执行确认：返回码 0=执行 2=跳过 130=退出
+_dddrun_confirm_section() {
+  local section_name="$1"
+  local section_cmd="$2"
+  local TERMINAL="/dev/tty"
+  local opt=""
+
+  printf_color "blue" "\n📦 即将执行功能区: ${section_name}"
+  echo "$section_cmd"
+  while true; do
+    read -n 1 -p "Action: [Y]Run | [S]Skip | [N]Abort: " opt < "$TERMINAL"
+    echo
+    case "$opt" in
+      [yY]) return 0 ;;
+      [sS]) return 2 ;;
+      [nN]) return 130 ;;
+      *) printf_color "red" "无效的输入，请输入 Y/S/N" ;;
+    esac
+  done
+}
+
+# 将命令块按功能区执行（单行 SECTION 写法）：
+#   ## [SECTION] 区块名
+#   ...命令...
+# 未标记内容会自动作为独立区块处理
+_dddrun_execute_with_sections() {
+  local init_content="$1"
+  local raw_cmd="$2"
+  local line=""
+  local in_section=0
+  local current_name=""
+  local current_body=""
+  local outside_body=""
+  local auto_index=1
+  local section_name=""
+  local section_body=""
+  local run_rc=0
+  local ran_any=0
+  local i=0
+  local -a section_names=()
+  local -a section_bodies=()
+
+  _append_section() {
+    local name="$1"
+    local body="$2"
+    [[ -z "${body//[[:space:]]/}" ]] && return 0
+    section_names+=("$name")
+    section_bodies+=("$body")
+  }
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ^##[[:space:]]*\[SECTION\](.*)$ ]]; then
+      if [ "$in_section" -eq 1 ]; then
+        _append_section "$current_name" "$current_body"
+        auto_index=$((auto_index + 1))
+      fi
+
+      if [[ -n "${outside_body//[[:space:]]/}" ]]; then
+        _append_section "未标记区块-${auto_index}" "$outside_body"
+        auto_index=$((auto_index + 1))
+        outside_body=""
+      fi
+
+      current_name="${BASH_REMATCH[1]}"
+      current_name="${current_name#"${current_name%%[![:space:]]*}"}"
+      [ -z "$current_name" ] && current_name="功能区-${auto_index}"
+      current_body=""
+      in_section=1
+      continue
+    fi
+
+    if [ "$in_section" -eq 1 ]; then
+      if [ -n "$current_body" ]; then current_body+=$'\n'; fi
+      current_body+="$line"
+    else
+      if [ -n "$outside_body" ]; then outside_body+=$'\n'; fi
+      outside_body+="$line"
+    fi
+  done <<< "$raw_cmd"
+
+  # 单行 SECTION 自动收尾
+  if [ "$in_section" -eq 1 ]; then
+    _append_section "$current_name" "$current_body"
+  fi
+
+  if [[ -n "${outside_body//[[:space:]]/}" ]]; then
+    _append_section "未标记区块-${auto_index}" "$outside_body"
+  fi
+
+  # 没有功能区标签时，整个块视为单区块
+  if [ "${#section_names[@]}" -eq 0 ]; then
+    _append_section "默认区块" "$raw_cmd"
+  fi
+
+  for i in "${!section_names[@]}"; do
+    section_name="${section_names[$i]}"
+    section_body="${section_bodies[$i]}"
+
+    _dddrun_confirm_section "$section_name" "$section_body"
+    run_rc=$?
+    case "$run_rc" in
+      0) local final_cmd="${init_content}${init_content:+;}${section_body}"
+         /bin/bash -c "$final_cmd" || return 1; ran_any=1 ;;
+      2) printf_color "yellow" "⏭️ 已跳过: ${section_name}" ;;
+      130) return 130 ;;
+      *) return 1 ;;
+    esac
+  done
+
+  [ "$ran_any" -eq 1 ] && return 0
+  return 2
+}
+
 # 核心通用函数 (内部使用)
 _dddrun_core() {
   local file="$1"
@@ -181,6 +251,7 @@ _dddrun_core() {
       echo "    -f         刷新 ${BLOCKS[2]} 块"
       echo "    [string]   搜索包含该字符串的命令 并进入 fzf 交互模式"
       echo "-----------------------------------------------"
+      echo "  功能区执行: 使用 '## [SECTION] 名称' 单行分段"
       echo "  文件结构建议: 包含 ${BLOCKS[1]} ${BLOCKS[2]} ${BLOCKS[3]} 结构块"
       return 0 ;;
     "-f")
@@ -232,22 +303,22 @@ _dddrun_core() {
   [ -z "$cmd" ] && { echo "❌ 未找到匹配 '$pattern' 的指令。"; return 1; }
 
   # ---- 最终执行 ----
-  printf_color "green" "🚀 执行中:"
-  echo "$cmd"
-  echo "-----------------------------------------------"
+  # printf_color "green" "🚀 执行中:"
+  # echo "$cmd"
+  # echo "-----------------------------------------------"
 
-  # 将 [INIT] 与抓取到的命令拼接，交给子 Bash 执行
-  # 如此 cmd 可以直接调用 [INIT] 中的定义
-  # local final_cmd="${init_content}${init_content:+;}${cmd}"
+  # 按功能区逐段确认并执行；无功能区标签时，整个块视为单区块
+  _dddrun_execute_with_sections "$init_content" "$cmd"
+  local exec_rc=$?
 
-  # 执行 + 记录一条历史
-  if echo "$cmd" | ONE_BY_ONE "$init_content"; then
-    if [ $? -eq 0 ]; then
-      local old_history=$(_dddrun_block_get "$file" "${BLOCKS[3]}")
-      local new_history=$( (echo "$pattern"; echo "$old_history") | awk 'NF && !vis[$0]++' )
-      echo "$new_history" | _dddrun_block_set "$file" "${BLOCKS[3]}"
-    fi
-  fi
+  case "$exec_rc" in
+    0) local old_history=$(_dddrun_block_get "$file" "${BLOCKS[3]}")
+       local new_history=$( (echo "$pattern"; echo "$old_history") | awk 'NF && !vis[$0]++' )
+       echo "$new_history" | _dddrun_block_set "$file" "${BLOCKS[3]}" ;;
+    2) printf_color "yellow" "⏭️ 所有功能区均被跳过，未执行任何命令" ;;
+    130) printf_color "red" "🛑 用户终止执行"; return 130 ;;
+    *) return "$exec_rc" ;;
+  esac
 }
 
 # --- 用户调用接口 ---
