@@ -27,27 +27,69 @@ alias dddtoolss="source /home/bowl/Code/ShellTools/script_dir/system_menu.sh"
 alias dddcqzm="kquitapp6 plasmashell || killall plasmashell && setsid plasmashell > /dev/null 2>&1 &"
 
 declare -A COLORS=(
-    ["red"]="\033[1;31m"
-    ["green"]="\033[1;32m"
-    ["yellow"]="\033[1;33m"
-    ["blue"]="\033[1;34m"
-    ["purple"]="\033[1;35m"
-    ["cyan"]="\033[1;36m"
-    ["white"]="\033[1;37m"
-    ["reset"]="\033[0m"
+  ["red"]="\033[1;31m"
+  ["green"]="\033[1;32m"
+  ["yellow"]="\033[1;33m"
+  ["blue"]="\033[1;34m"
+  ["purple"]="\033[1;35m"
+  ["cyan"]="\033[1;36m"
+  ["white"]="\033[1;37m"
+  ["reset"]="\033[0m"
 )
 printf_color() {
-    local color_name=$(echo "$1" | tr '[:upper:]' '[:lower:]') # 转小写
-    local message="$2"
-    local color_code="${COLORS[$color_name]}"
+  local color_name=$(echo "$1" | tr '[:upper:]' '[:lower:]') # 转小写
+  local message="$2"
+  local color_code="${COLORS[$color_name]}"
 
-    # 如果颜色不存在，默认用白色
-    if [[ -z "$color_code" ]]; then
-        color_code="${COLORS["white"]}"
+  # 默认白色
+  if [[ -z "$color_code" ]]; then
+    color_code="${COLORS["white"]}"
+  fi
+
+  echo -e "${color_code}${message}${COLORS["reset"]}"
+}
+# 用法1: 将需要逐行执行的块，使用 ONE_BY_ONE <<'EOF' 包裹
+# ONE_BY_ONE <<'EOF'
+#   uptime
+# EOF
+# 用法2: echo "$cmd" | ONE_BY_ONE
+ONE_BY_ONE() {
+  local init_arg="$1"
+  local TERMINAL="/dev/tty"
+  local ALWAYS_YES=false
+  [[ -n "$init_arg" ]] && eval "$init_arg"
+  # 预询问：是否全部自动执行
+  echo -n "$(printf_color "cyan" "多行是否全部自动执行 (All Yes)? [y/N]: ")"
+  read -n 1 -t 10 pre_opt < "$TERMINAL"
+  echo
+  [[ "$pre_opt" =~ [yY] ]] && ALWAYS_YES=true
+  # 从标准输入（stdin）读取
+  while IFS= read -r cmd; do
+    [[ -z "${cmd// }" || "$cmd" =~ ^# ]] && continue
+
+    # 直接运行并跳过交互
+    if [ "$ALWAYS_YES" = true ]; then
+      printf_color "green" "[自动执行中...]"
+      eval "$cmd"
+      continue
     fi
 
-    # 打印颜色内容 + 自动重置颜色
-    echo -e "${color_code}${message}${COLORS["reset"]}"
+    printf_color "blue" "\n[即将执行] $cmd"
+    while true; do
+      # 需从 /dev/tty 获取交互，因为 stdin 正在被读取命令
+      read -n 1 -p "Action: [Y]Run | [S]Skip | [N]Abort: " opt < "$TERMINAL"
+      echo
+      case "$opt" in
+        [yY]) printf_color "green" "[正在执行...]"
+              eval "$cmd"; break ;;
+        [sS]) printf_color "yellow" "[跳过执行...]"
+              break ;;
+        [nN]) printf_color "red" "[退出脚本...]"
+              exit 0 ;;
+        *) printf_color "red" "无效的输入，请输入 Y/S/N" ;;
+      esac
+    done
+  done
 }
 
 # 块定位函数
@@ -154,8 +196,7 @@ _dddrun_core() {
     "-c")
       # 将空内容传入块更新函数，实现“只清空该块、保留标签”的效果
       echo "" | _dddrun_block_set "$file" "${BLOCKS[3]}"
-      echo "🧹 ${BLOCKS[3]} 块已清空"
-      return 0 ;;
+      echo "🧹 ${BLOCKS[3]} 块已清空"; return 0 ;;
     "-l")
       pattern=$(echo "$history_cmds" | head -n 1)
       if [ -z "$pattern" ]; then echo "❌ 暂无执行历史"; return 1; fi
@@ -181,7 +222,8 @@ _dddrun_core() {
     [ -z "$pattern" ] && return 0
   fi
 
-  echo "${file} and ${pattern}"
+  # 调试使用
+  # echo "${file} and ${pattern}"
 
   # ---- 正式提取命令 ----
   local cmd=$(_dddrun_block_get "$file" "$pattern")
@@ -196,10 +238,10 @@ _dddrun_core() {
 
   # 将 [INIT] 与抓取到的命令拼接，交给子 Bash 执行
   # 如此 cmd 可以直接调用 [INIT] 中的定义
-  local final_cmd="${init_content}${init_content:+;}${cmd}"
+  # local final_cmd="${init_content}${init_content:+;}${cmd}"
 
   # 执行 + 记录一条历史
-  if /bin/bash -c "$final_cmd"; then
+  if echo "$cmd" | ONE_BY_ONE "$init_content"; then
     if [ $? -eq 0 ]; then
       local old_history=$(_dddrun_block_get "$file" "${BLOCKS[3]}")
       local new_history=$( (echo "$pattern"; echo "$old_history") | awk 'NF && !vis[$0]++' )
