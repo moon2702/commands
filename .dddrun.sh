@@ -87,7 +87,7 @@ _dddrun_confirm_section() {
   local opt=""
 
   printf_color "blue" "\n📦 即将执行功能区: ${section_name}"
-  echo "$section_cmd"
+  # echo "$section_cmd"
   while true; do
     read -n 1 -p "Action: [Y]Run | [S]Skip | [N]Abort: " opt < "$TERMINAL"
     echo
@@ -207,7 +207,7 @@ _dddrun_core() {
       echo "-----------------------------------------------"
       echo "  可选参数 [args]:"
       echo "    (空)       进入 fzf 交互模式 (智能置顶历史记录)"
-      echo "    -l         快速执行最后一次成功运行的命令"
+      echo "    -l         快速执行最后一次选择的命令"
       echo "    -e         使用 vim 编辑当前的配置文件"
       echo "    -c         清空当前配置文件的 ${BLOCKS[3]} 区块"
       echo "    -h         显示本帮助信息"
@@ -259,15 +259,16 @@ _dddrun_core() {
   local cmd=$(_dddrun_block_get "$file" "$pattern")
   [ -z "$cmd" ] && { echo "❌ 未找到匹配 '$pattern' 的指令。"; return 1; }
 
+  # 选中后即写入历史，不再依赖执行结果。
+  local old_history=$(_dddrun_block_get "$file" "${BLOCKS[3]}")
+  local new_history=$( (echo "$pattern"; echo "$old_history") | awk 'NF && !vis[$0]++' )
+  echo "$new_history" | _dddrun_block_set "$file" "${BLOCKS[3]}"
+
   _dddrun_execute_with_sections "$init_content" "$cmd"
   local exec_rc=$?
 
   case "$exec_rc" in
-    0)
-      local old_history=$(_dddrun_block_get "$file" "${BLOCKS[3]}")
-      local new_history=$( (echo "$pattern"; echo "$old_history") | awk 'NF && !vis[$0]++' )
-      echo "$new_history" | _dddrun_block_set "$file" "${BLOCKS[3]}"
-      ;;
+    0) printf_color "green" "✅ 命令执行成功";;
     2) printf_color "yellow" "⏭️ 所有功能区均被跳过，未执行任何命令" ;;
     130) printf_color "red" "🛑 用户终止执行"; return 130 ;;
     *) return "$exec_rc" ;;
