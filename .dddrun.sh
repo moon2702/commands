@@ -69,6 +69,7 @@ declare -A BLOCKS=(
   [1]="[COMMANDS_INIT]"
   [2]="[COMMANDS_CONFIGS]"
   [3]="[COMMANDS_HISTORY]"
+  [4]="[SECTION]"
 )
 
 _get_fresh_configs() {
@@ -103,6 +104,9 @@ _dddrun_confirm_section() {
 _dddrun_execute_with_sections() {
   local init_content="$1"
   local raw_cmd="$2"
+  local section_tag="${BLOCKS[4]}"
+  local section_tag_regex="${section_tag//[/\\[}"
+  section_tag_regex="${section_tag_regex//]/\\]}"
   local line=""
   local in_section=0
   local current_name=""
@@ -126,7 +130,7 @@ _dddrun_execute_with_sections() {
   }
 
   while IFS= read -r line || [ -n "$line" ]; do
-    if [[ "$line" =~ ^##[[:space:]]*\[SECTION\](.*)$ ]]; then
+    if [[ "$line" =~ ^##[[:space:]]*${section_tag_regex}(.*)$ ]]; then
       if [ "$in_section" -eq 1 ]; then
         _append_section "$current_name" "$current_body"
         auto_index=$((auto_index + 1))
@@ -167,26 +171,37 @@ _dddrun_execute_with_sections() {
     _append_section "默认区块" "$raw_cmd"
   fi
 
-  for i in "${!section_names[@]}"; do
-    section_name="${section_names[$i]}"
-    section_body="${section_bodies[$i]}"
+  (
+    if [ -n "$init_content" ]; then
+      eval "$init_content" || exit 1
+    fi
 
-    _dddrun_confirm_section "$section_name" "$section_body"
-    run_rc=$?
-    case "$run_rc" in
-      0)
-        local final_cmd="${init_content}${init_content:+;}${section_body}"
-        /bin/bash -c "$final_cmd" || return 1
-        ran_any=1
-        ;;
-      2) printf_color "yellow" "⏭️ 已跳过: ${section_name}" ;;
-      130) return 130 ;;
-      *) return 1 ;;
-    esac
-  done
+    for i in "${!section_names[@]}"; do
+      section_name="${section_names[$i]}"
+      section_body="${section_bodies[$i]}"
 
-  [ "$ran_any" -eq 1 ] && return 0
-  return 2
+      _dddrun_confirm_section "$section_name" "$section_body"
+      run_rc=$?
+      case "$run_rc" in
+        0)
+          eval "$section_body"
+          run_rc=$?
+          case "$run_rc" in
+            0) ran_any=1 ;;
+            130) exit 130 ;;
+            *) exit 1 ;;
+          esac
+          ;;
+        2) printf_color "yellow" "⏭️ 已跳过: ${section_name}" ;;
+        130) exit 130 ;;
+        *) exit 1 ;;
+      esac
+    done
+
+    [ "$ran_any" -eq 1 ] && exit 0
+    exit 2
+  )
+  return $?
 }
 
 _dddrun_core() {
@@ -214,8 +229,8 @@ _dddrun_core() {
       echo "    -f         刷新 ${BLOCKS[2]} 块"
       echo "    [string]   搜索包含该字符串的命令 并进入 fzf 交互模式"
       echo "-----------------------------------------------"
-      echo "  功能区执行: 使用 '## [SECTION] 名称' 单行分段"
-      echo "  文件结构建议: 包含 ${BLOCKS[1]} ${BLOCKS[2]} ${BLOCKS[3]} 结构块"
+      echo "  功能区执行: 使用 '## ${BLOCKS[4]} 名称' 单行分段"
+      echo "  文件结构建议: 包含 ${BLOCKS[1]} ${BLOCKS[2]} ${BLOCKS[3]}（可选 ${BLOCKS[4]}）"
       return 0
       ;;
     "-f")
