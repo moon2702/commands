@@ -105,6 +105,7 @@ _dddrun_confirm_section() {
 _dddrun_execute_with_sections() {
   local init_content="$1"
   local raw_cmd="$2"
+  local use_section_fzf="${3:-0}"
   local section_tag="${BLOCKS[4]}"
   local section_tag_regex="${section_tag//[/\\[}"
   section_tag_regex="${section_tag_regex//]/\\]}"
@@ -172,6 +173,40 @@ _dddrun_execute_with_sections() {
     _append_section "默认区块" "$raw_cmd"
   fi
 
+  local -A _selected_idx=()
+  if [ "$use_section_fzf" -eq 1 ] && [ "${#section_names[@]}" -gt 0 ]; then
+    local _tmp _label _padded _picked _rc _num_str _pick_line
+    _tmp=$(mktemp -d -t dddrun.XXXXXX) || { printf_color "red" "❌ 无法创建临时目录"; return 1; }
+    local -a _labels=()
+    for i in "${!section_names[@]}"; do
+      printf -v _padded "%03d" "$((i + 1))"
+      _label="${_padded} ${section_names[$i]}"
+      _labels+=("$_label")
+      printf '%s' "${section_bodies[$i]}" > "$_tmp/$_label"
+    done
+
+    _picked=$(printf '%s\n' "${_labels[@]}" | fzf \
+      --multi --no-sort --reverse --border --height 80% \
+      --bind 'ctrl-a:select-all,ctrl-d:deselect-all,ctrl-t:toggle-all' \
+      --header "🎯 Tab 勾选 · Ctrl-A 全选 · Ctrl-D 取消全选 · Ctrl-T 反选 · Enter 执行 · ESC 放弃" \
+      --preview "cat \"$_tmp\"/{}" \
+      --preview-window "bottom:10:wrap"
+    )
+    _rc=$?
+    rm -rf "$_tmp"
+
+    if [ "$_rc" -eq 130 ] || [ -z "$_picked" ]; then
+      printf_color "red" "🛑 已放弃功能区选择"
+      return 130
+    fi
+
+    while IFS= read -r _pick_line; do
+      [ -z "$_pick_line" ] && continue
+      _num_str="${_pick_line%% *}"
+      _selected_idx[$((10#$_num_str - 1))]=1
+    done <<< "$_picked"
+  fi
+
   (
     if [ -n "$init_content" ]; then
       eval "$init_content" || exit 1
@@ -180,6 +215,22 @@ _dddrun_execute_with_sections() {
     for i in "${!section_names[@]}"; do
       section_name="${section_names[$i]}"
       section_body="${section_bodies[$i]}"
+
+      if [ "$use_section_fzf" -eq 1 ]; then
+        if [ -z "${_selected_idx[$i]:-}" ]; then
+          printf_color "yellow" "⏭️ 已跳过: ${section_name}"
+          continue
+        fi
+        printf_color "blue" "\n📦 执行功能区: ${section_name}"
+        eval "$section_body"
+        run_rc=$?
+        case "$run_rc" in
+          0) ran_any=1 ;;
+          130) exit 130 ;;
+          *) exit 1 ;;
+        esac
+        continue
+      fi
 
       _dddrun_confirm_section "$section_name" "$section_body"
       run_rc=$?
@@ -208,6 +259,7 @@ _dddrun_execute_with_sections() {
 _dddrun_core() {
   local file="$1"
   local input_arg="$2"
+  local use_section_fzf="${3:-0}"
   local pattern=""
   [ ! -f "$file" ] && { echo "❌ 找不到文件: $file"; return 1; }
 
@@ -228,6 +280,7 @@ _dddrun_core() {
       echo "    -c         清空当前配置文件的 ${BLOCKS[3]} 区块"
       echo "    -h         显示本帮助信息"
       echo "    -f         刷新 ${BLOCKS[2]} 块"
+      echo "    -s         功能区多选模式 (可与 -l / [string] 组合, ESC 放弃)"
       echo "    [string]   搜索包含该字符串的命令 并进入 fzf 交互模式"
       echo "-----------------------------------------------"
       echo "  功能区执行: 使用 '## ${BLOCKS[4]} 名称' 单行分段"
@@ -280,7 +333,7 @@ _dddrun_core() {
   local new_history=$( (echo "$pattern"; echo "$old_history") | awk 'NF && !vis[$0]++' )
   echo "$new_history" | _dddrun_block_set "$file" "${BLOCKS[3]}"
 
-  _dddrun_execute_with_sections "$init_content" "$cmd"
+  _dddrun_execute_with_sections "$init_content" "$cmd" "$use_section_fzf"
   local exec_rc=$?
 
   case "$exec_rc" in
@@ -291,10 +344,28 @@ _dddrun_core() {
   esac
 }
 
+_dddrun_parse_section_flag() {
+  local fzf_flag=0
+  local -a rest=()
+  local a
+  for a in "$@"; do
+    case "$a" in
+      -s) fzf_flag=1 ;;
+      *)  rest+=("$a") ;;
+    esac
+  done
+  printf '%s\n' "$fzf_flag"
+  printf '%s\n' "${rest[0]:-}"
+}
+
 dddrun-cmd() {
-  _dddrun_core "commands" "$1"
+  local fzf_flag rest_arg
+  { IFS= read -r fzf_flag; IFS= read -r rest_arg; } < <(_dddrun_parse_section_flag "$@")
+  _dddrun_core "commands" "$rest_arg" "$fzf_flag"
 }
 
 dddrun-global() {
-  _dddrun_core "$HOME/.commands" "$1"
+  local fzf_flag rest_arg
+  { IFS= read -r fzf_flag; IFS= read -r rest_arg; } < <(_dddrun_parse_section_flag "$@")
+  _dddrun_core "$HOME/.commands" "$rest_arg" "$fzf_flag"
 }
