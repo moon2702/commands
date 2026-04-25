@@ -182,14 +182,14 @@ _dddrun_execute_with_sections() {
       printf -v _padded "%03d" "$((i + 1))"
       _label="${_padded} ${section_names[$i]}"
       _labels+=("$_label")
-      printf '%s' "${section_bodies[$i]}" > "$_tmp/$_label"
+      printf '%s' "${section_bodies[$i]}" > "$_tmp/$_padded"
     done
 
     _picked=$(printf '%s\n' "${_labels[@]}" | fzf \
       --multi --no-sort --reverse --border --height 80% \
       --bind 'ctrl-a:select-all,ctrl-d:deselect-all,ctrl-t:toggle-all' \
       --header "🎯 Tab 勾选 · Ctrl-A 全选 · Ctrl-D 取消全选 · Ctrl-T 反选 · Enter 执行 · ESC 放弃" \
-      --preview "cat \"$_tmp\"/{}" \
+      --preview "cat \"$_tmp\"/{1}" \
       --preview-window "bottom:10:wrap"
     )
     _rc=$?
