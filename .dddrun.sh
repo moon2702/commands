@@ -73,6 +73,7 @@ declare -A BLOCKS=(
 )
 
 _get_fresh_configs() {
+  local file="$1"
   local block_list
   block_list=$(printf "%s\n" "${BLOCKS[@]}")
 
@@ -235,7 +236,7 @@ _dddrun_core() {
       ;;
     "-f")
       echo "🔄 正在同步 ${BLOCKS[2]} 索引..."
-      local new_configs=$(_get_fresh_configs)
+      local new_configs=$(_get_fresh_configs "$file")
       [ -z "$new_configs" ] && { echo "⚠️ 未在文件中发现任何有效的业务指令块。"; return 1; }
       echo "$new_configs" | _dddrun_block_set "$file" "${BLOCKS[2]}"
       echo "✅ 索引已刷新 ($(echo "$new_configs" | wc -l) 条记录)。"
@@ -259,7 +260,7 @@ _dddrun_core() {
   if [ -z "$pattern" ]; then
     [ -z "$all_configs" ] && { printf_color "red" "🛑 ${BLOCKS[2]} 索引为空！请先使用 -f 刷新"; return 1; }
     pattern=$({ echo "$history_cmds"; echo "$all_configs"; } | awk 'NF && !vis[$0]++' | fzf \
-      --height 80% --reverse --border --query "$input_arg" \
+      --height 80% --reverse --border --no-sort --query "$input_arg" \
       --header "🎯 选择操作 (ESC 退出)" --preview-window "bottom:8:wrap" \
       --preview "
           $(declare -f _dddrun_block_locate);
