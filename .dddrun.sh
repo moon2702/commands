@@ -70,6 +70,7 @@ declare -A BLOCKS=(
   [2]="[COMMANDS_CONFIGS]"
   [3]="[COMMANDS_HISTORY]"
   [4]="[SECTION]"
+  [5]="[INIT]"
 )
 
 _get_fresh_configs() {
@@ -106,11 +107,8 @@ _dddrun_execute_with_sections() {
   local init_content="$1"
   local raw_cmd="$2"
   local use_section_fzf="${3:-0}"
-  local section_tag="${BLOCKS[4]}"
-  local section_tag_regex="${section_tag//[/\\[}"
-  section_tag_regex="${section_tag_regex//]/\\]}"
   local line=""
-  local in_section=0
+  local current_kind=""
   local current_name=""
   local current_body=""
   local outside_body=""
@@ -122,6 +120,8 @@ _dddrun_execute_with_sections() {
   local i=0
   local -a section_names=()
   local -a section_bodies=()
+  local -a init_names=()
+  local -a init_bodies=()
 
   _append_section() {
     local name="$1"
@@ -131,12 +131,28 @@ _dddrun_execute_with_sections() {
     section_bodies+=("$body")
   }
 
+  _append_init() {
+    local name="$1"
+    local body="$2"
+    [[ -z "${body//[[:space:]]/}" ]] && return 0
+    init_names+=("$name")
+    init_bodies+=("$body")
+  }
+
+  _flush_current() {
+    case "$current_kind" in
+      SECTION) _append_section "$current_name" "$current_body" ;;
+      INIT)    _append_init    "$current_name" "$current_body" ;;
+    esac
+  }
+
   while IFS= read -r line || [ -n "$line" ]; do
-    if [[ "$line" =~ ^##[[:space:]]*${section_tag_regex}(.*)$ ]]; then
-      if [ "$in_section" -eq 1 ]; then
-        _append_section "$current_name" "$current_body"
-        auto_index=$((auto_index + 1))
-      fi
+    if [[ "$line" =~ ^##[[:space:]]*\[(SECTION|INIT)\](.*)$ ]]; then
+      local _kind="${BASH_REMATCH[1]}"
+      local _rest="${BASH_REMATCH[2]}"
+
+      _flush_current
+      [ "$current_kind" = "SECTION" ] && auto_index=$((auto_index + 1))
 
       if [[ -n "${outside_body//[[:space:]]/}" ]]; then
         _append_section "未标记区块-${auto_index}" "$outside_body"
@@ -144,15 +160,20 @@ _dddrun_execute_with_sections() {
         outside_body=""
       fi
 
-      current_name="${BASH_REMATCH[1]}"
-      current_name="${current_name#"${current_name%%[![:space:]]*}"}"
-      [ -z "$current_name" ] && current_name="功能区-${auto_index}"
+      current_name="${_rest#"${_rest%%[![:space:]]*}"}"
+      if [ -z "$current_name" ]; then
+        if [ "$_kind" = "SECTION" ]; then
+          current_name="功能区-${auto_index}"
+        else
+          current_name="初始化-$((${#init_names[@]} + 1))"
+        fi
+      fi
       current_body=""
-      in_section=1
+      current_kind="$_kind"
       continue
     fi
 
-    if [ "$in_section" -eq 1 ]; then
+    if [ -n "$current_kind" ]; then
       if [ -n "$current_body" ]; then current_body+=$'\n'; fi
       current_body+="$line"
     else
@@ -161,15 +182,13 @@ _dddrun_execute_with_sections() {
     fi
   done <<< "$raw_cmd"
 
-  if [ "$in_section" -eq 1 ]; then
-    _append_section "$current_name" "$current_body"
-  fi
+  _flush_current
 
   if [[ -n "${outside_body//[[:space:]]/}" ]]; then
     _append_section "未标记区块-${auto_index}" "$outside_body"
   fi
 
-  if [ "${#section_names[@]}" -eq 0 ]; then
+  if [ "${#section_names[@]}" -eq 0 ] && [ "${#init_bodies[@]}" -eq 0 ]; then
     _append_section "默认区块" "$raw_cmd"
   fi
 
@@ -211,6 +230,17 @@ _dddrun_execute_with_sections() {
     if [ -n "$init_content" ]; then
       eval "$init_content" || exit 1
     fi
+
+    for i in "${!init_bodies[@]}"; do
+      printf_color "cyan" "\n🔧 初始化: ${init_names[$i]}"
+      eval "${init_bodies[$i]}"
+      run_rc=$?
+      case "$run_rc" in
+        0) ran_any=1 ;;
+        130) exit 130 ;;
+        *) printf_color "red" "❌ 初始化失败: ${init_names[$i]}"; exit 1 ;;
+      esac
+    done
 
     for i in "${!section_names[@]}"; do
       section_name="${section_names[$i]}"
@@ -284,8 +314,10 @@ _dddrun_core() {
       echo "    [string]   搜索包含该字符串的命令 并进入 fzf 交互模式"
       echo "  短选项可合并: 例如 -ls 等价 -l -s, -cf 等价 -c -f, -cls 等价 -c -l -s"
       echo "-----------------------------------------------"
-      echo "  功能区执行: 使用 '## ${BLOCKS[4]} 名称' 单行分段"
-      echo "  文件结构建议: 包含 ${BLOCKS[1]} ${BLOCKS[2]} ${BLOCKS[3]}（可选 ${BLOCKS[4]}）"
+      echo "  命令内分段标签:"
+      echo "    ## ${BLOCKS[5]} 名称   命令内的初始化段, 强制执行, 不询问, 不进 fzf 多选"
+      echo "    ## ${BLOCKS[4]} 名称   功能区段, 询问 Y/S/N 或参与 -s 多选; 顺序执行, 失败即停"
+      echo "  文件结构建议: 包含 ${BLOCKS[1]} ${BLOCKS[2]} ${BLOCKS[3]}（可选 ${BLOCKS[4]}/${BLOCKS[5]}）"
       return 0
       ;;
     "-f")
