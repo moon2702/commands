@@ -282,6 +282,7 @@ _dddrun_core() {
       echo "    -f         刷新 ${BLOCKS[2]} 块"
       echo "    -s         功能区多选模式 (可与 -l / [string] 组合, ESC 放弃)"
       echo "    [string]   搜索包含该字符串的命令 并进入 fzf 交互模式"
+      echo "  短选项可合并: 例如 -ls 等价 -l -s, -cf 等价 -c -f, -cls 等价 -c -l -s"
       echo "-----------------------------------------------"
       echo "  功能区执行: 使用 '## ${BLOCKS[4]} 名称' 单行分段"
       echo "  文件结构建议: 包含 ${BLOCKS[1]} ${BLOCKS[2]} ${BLOCKS[3]}（可选 ${BLOCKS[4]}）"
@@ -344,28 +345,50 @@ _dddrun_core() {
   esac
 }
 
-_dddrun_parse_section_flag() {
+_dddrun_dispatch() {
+  local file="$1"
+  shift
+
   local fzf_flag=0
-  local -a rest=()
-  local a
-  for a in "$@"; do
-    case "$a" in
-      -s) fzf_flag=1 ;;
-      *)  rest+=("$a") ;;
-    esac
+  local -a actions=()
+  local arg i ch
+
+  for arg in "$@"; do
+    if [[ "$arg" =~ ^-[a-zA-Z]{2,}$ ]]; then
+      for (( i=1; i<${#arg}; i++ )); do
+        ch="${arg:$i:1}"
+        if [ "$ch" = "s" ]; then
+          fzf_flag=1
+        else
+          actions+=("-$ch")
+        fi
+      done
+    elif [ "$arg" = "-s" ]; then
+      fzf_flag=1
+    else
+      actions+=("$arg")
+    fi
   done
-  printf '%s\n' "$fzf_flag"
-  printf '%s\n' "${rest[0]:-}"
+
+  if [ "${#actions[@]}" -eq 0 ]; then
+    _dddrun_core "$file" "" "$fzf_flag"
+    return $?
+  fi
+
+  local rc=0
+  for arg in "${actions[@]}"; do
+    _dddrun_core "$file" "$arg" "$fzf_flag"
+    rc=$?
+    [ "$rc" -eq 130 ] && return 130
+    [ "$rc" -ne 0 ] && return "$rc"
+  done
+  return 0
 }
 
 dddrun-cmd() {
-  local fzf_flag rest_arg
-  { IFS= read -r fzf_flag; IFS= read -r rest_arg; } < <(_dddrun_parse_section_flag "$@")
-  _dddrun_core "commands" "$rest_arg" "$fzf_flag"
+  _dddrun_dispatch "commands" "$@"
 }
 
 dddrun-global() {
-  local fzf_flag rest_arg
-  { IFS= read -r fzf_flag; IFS= read -r rest_arg; } < <(_dddrun_parse_section_flag "$@")
-  _dddrun_core "$HOME/.commands" "$rest_arg" "$fzf_flag"
+  _dddrun_dispatch "$HOME/.commands" "$@"
 }
