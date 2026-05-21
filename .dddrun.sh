@@ -3,6 +3,10 @@
 [[ -n "${_DDDRUN_SH_LOADED:-}" ]] && return 0
 _DDDRUN_SH_LOADED=1
 
+# 路径配置（可按需修改）
+DDDRUN_FZF=/usr/bin/fzf
+DDDRUN_GLOBAL_COMMANDS="$HOME/.commands"
+
 declare -A COLORS=(
   ["red"]="\033[1;31m"
   ["green"]="\033[1;32m"
@@ -204,7 +208,7 @@ _dddrun_execute_with_sections() {
       printf '%s' "${section_bodies[$i]}" > "$_tmp/$_padded"
     done
 
-    _picked=$(printf '%s\n' "${_labels[@]}" | fzf \
+    _picked=$(printf '%s\n' "${_labels[@]}" | "$DDDRUN_FZF" \
       --multi --no-sort --reverse --border --height 80% \
       --bind 'ctrl-a:select-all,ctrl-d:deselect-all,ctrl-t:toggle-all' \
       --header "🎯 Tab 勾选 · Ctrl-A 全选 · Ctrl-D 取消全选 · Ctrl-T 反选 · Enter 执行 · ESC 放弃" \
@@ -301,7 +305,7 @@ _dddrun_core() {
     "-h")
       printf_color "blue" "📖 dddrun 使用帮助:"
       echo "  dddrun-cmd [args]    执行当前目录下的 commands"
-      echo "  dddrun-global [args] 执行全局 ~/.commands"
+      echo "  dddrun-global [args] 执行全局 $DDDRUN_GLOBAL_COMMANDS"
       echo "-----------------------------------------------"
       echo "  可选参数 [args]:"
       echo "    (空)       进入 fzf 交互模式 (智能置顶历史记录)"
@@ -345,7 +349,7 @@ _dddrun_core() {
 
   if [ -z "$pattern" ]; then
     [ -z "$all_configs" ] && { printf_color "red" "🛑 ${BLOCKS[2]} 索引为空！请先使用 -f 刷新"; return 1; }
-    pattern=$({ echo "$history_cmds"; echo "$all_configs"; } | awk 'NF && !vis[$0]++' | fzf \
+    pattern=$({ echo "$history_cmds"; echo "$all_configs"; } | awk 'NF && !vis[$0]++' | "$DDDRUN_FZF" \
       --height 80% --reverse --border --no-sort --query "$input_arg" \
       --header "🎯 选择操作 (ESC 退出)" --preview-window "bottom:8:wrap" \
       --preview "
@@ -422,5 +426,5 @@ dddrun-cmd() {
 }
 
 dddrun-global() {
-  _dddrun_dispatch "$HOME/.commands" "$@"
+  _dddrun_dispatch "$DDDRUN_GLOBAL_COMMANDS" "$@"
 }
