@@ -107,10 +107,28 @@ _dddrun_confirm_section() {
   done
 }
 
+_dddrun_repeat_gate() {
+  local use_section_fzf="$1"
+  [ "$use_section_fzf" -eq 0 ] && return 0
+
+  local opt="" TERMINAL="/dev/tty"
+  while true; do
+    read -r -n 1 -p "是否继续重复执行? [Enter/Y]继续 [q]重选功能区 [ESC]退出全部: " opt < "$TERMINAL"
+    echo
+    case "$opt" in
+      ""|[yY]) return 0 ;;
+      [qQ]) return 1 ;;
+      $'\e') return 130 ;;
+      *) printf_color "red" "无效的输入，请按 Enter/Y 继续、q 重选功能区或 ESC 退出" ;;
+    esac
+  done
+}
+
 _dddrun_execute_with_sections() {
   local init_content="$1"
   local raw_cmd="$2"
   local use_section_fzf="${3:-0}"
+  local reuse_section_pick="${4:-0}"
   local line=""
   local current_kind=""
   local current_name=""
@@ -208,14 +226,20 @@ _dddrun_execute_with_sections() {
       printf '%s' "${section_bodies[$i]}" > "$_tmp/$_padded"
     done
 
-    _picked=$(printf '%s\n' "${_labels[@]}" | "$DDDRUN_FZF" \
-      --multi --no-sort --reverse --border --height 80% \
-      --bind 'ctrl-a:select-all,ctrl-d:deselect-all,ctrl-t:toggle-all' \
-      --header "🎯 Tab 勾选 · Ctrl-A 全选 · Ctrl-D 取消全选 · Ctrl-T 反选 · Enter 执行 · ESC 放弃" \
-      --preview "cat \"$_tmp\"/{1}" \
-      --preview-window "bottom:10:wrap"
-    )
-    _rc=$?
+    if [ "$reuse_section_pick" -eq 1 ] && [ -n "${_DDDRUN_CACHED_SECTION_PICK:-}" ]; then
+      _picked="$_DDDRUN_CACHED_SECTION_PICK"
+      _rc=0
+    else
+      _picked=$(printf '%s\n' "${_labels[@]}" | "$DDDRUN_FZF" \
+        --multi --no-sort --reverse --border --height 80% \
+        --bind 'ctrl-a:select-all,ctrl-d:deselect-all,ctrl-t:toggle-all' \
+        --header "🎯 Tab 勾选 · Ctrl-A 全选 · Ctrl-D 取消全选 · Ctrl-T 反选 · Enter 执行 · ESC 放弃" \
+        --preview "cat \"$_tmp\"/{1}" \
+        --preview-window "bottom:10:wrap"
+      )
+      _rc=$?
+      [ "$reuse_section_pick" -eq 1 ] && [ -n "$_picked" ] && _DDDRUN_CACHED_SECTION_PICK="$_picked"
+    fi
     rm -rf "$_tmp"
 
     if [ "$_rc" -eq 130 ] || [ -z "$_picked" ]; then
@@ -290,12 +314,46 @@ _dddrun_execute_with_sections() {
   return $?
 }
 
+_dddrun_run_selected() {
+  local file="$1"
+  local pattern="$2"
+  local init_content="$3"
+  local use_section_fzf="$4"
+  local reuse_section_pick="$5"
+  local write_history="$6"
+
+  local cmd exec_rc old_history new_history
+  cmd=$(_dddrun_block_get "$file" "$pattern")
+  [ -z "$cmd" ] && { echo "❌ 未找到匹配 '$pattern' 的指令。"; return 1; }
+
+  if [ "$write_history" -eq 1 ]; then
+    old_history=$(_dddrun_block_get "$file" "${BLOCKS[3]}")
+    new_history=$( (echo "$pattern"; echo "$old_history") | awk 'NF && !vis[$0]++' )
+    echo "$new_history" | _dddrun_block_set "$file" "${BLOCKS[3]}"
+  fi
+
+  _dddrun_execute_with_sections "$init_content" "$cmd" "$use_section_fzf" "$reuse_section_pick"
+  exec_rc=$?
+
+  case "$exec_rc" in
+    0) printf_color "green" "✅ 命令执行成功";;
+    2) printf_color "yellow" "⏭️ 所有功能区均被跳过，未执行任何命令" ;;
+    130) printf_color "red" "🛑 用户终止执行";;
+  esac
+  return "$exec_rc"
+}
+
 _dddrun_core() {
   local file="$1"
   local input_arg="$2"
   local use_section_fzf="${3:-0}"
+  local repeat_flag="${4:-0}"
   local pattern=""
+  local cached_pattern=""
+  local history_written=0
   [ ! -f "$file" ] && { echo "❌ 找不到文件: $file"; return 1; }
+
+  unset _DDDRUN_CACHED_SECTION_PICK
 
   local init_content=$(_dddrun_block_get "$file" "${BLOCKS[1]}")
   local all_configs=$(_dddrun_block_get "$file" "${BLOCKS[2]}")
@@ -315,8 +373,10 @@ _dddrun_core() {
       echo "    -h         显示本帮助信息"
       echo "    -f         刷新 ${BLOCKS[2]} 块"
       echo "    -s         功能区多选模式 (可与 -l / [string] 组合, ESC 放弃)"
+      echo "    -r         执行结束后自动重复本次选择 (Ctrl+C 退出循环)"
+      echo "    -s -r      每轮结束后确认: Enter/Y 继续, q 重选功能区, ESC 退出全部"
       echo "    [string]   搜索包含该字符串的命令 并进入 fzf 交互模式"
-      echo "  短选项可合并: 例如 -ls 等价 -l -s, -cf 等价 -c -f, -cls 等价 -c -l -s"
+      echo "  短选项可合并: 例如 -ls 等价 -l -s, -lr 等价 -l -r, -lsr 等价 -l -s -r (含轮次门控)"
       echo "-----------------------------------------------"
       echo "  命令内分段标签:"
       echo "    ## ${BLOCKS[5]} 名称   命令内的初始化段, 强制执行, 不询问, 不进 fzf 多选"
@@ -347,38 +407,71 @@ _dddrun_core() {
     *) ;;
   esac
 
-  if [ -z "$pattern" ]; then
-    [ -z "$all_configs" ] && { printf_color "red" "🛑 ${BLOCKS[2]} 索引为空！请先使用 -f 刷新"; return 1; }
-    pattern=$({ echo "$history_cmds"; echo "$all_configs"; } | awk 'NF && !vis[$0]++' | "$DDDRUN_FZF" \
-      --height 80% --reverse --border --no-sort --query "$input_arg" \
-      --header "🎯 选择操作 (ESC 退出)" --preview-window "bottom:8:wrap" \
-      --preview "
-          $(declare -f _dddrun_block_locate);
-          $(declare -f _dddrun_block_get);
-          _dddrun_block_get $file {}
-      "
-    )
+  if [ "$repeat_flag" -eq 0 ]; then
+    if [ -z "$pattern" ]; then
+      [ -z "$all_configs" ] && { printf_color "red" "🛑 ${BLOCKS[2]} 索引为空！请先使用 -f 刷新"; return 1; }
+      pattern=$({ echo "$history_cmds"; echo "$all_configs"; } | awk 'NF && !vis[$0]++' | "$DDDRUN_FZF" \
+        --height 80% --reverse --border --no-sort --query "$input_arg" \
+        --header "🎯 选择操作 (ESC 退出)" --preview-window "bottom:8:wrap" \
+        --preview "
+            $(declare -f _dddrun_block_locate);
+            $(declare -f _dddrun_block_get);
+            _dddrun_block_get $file {}
+        "
+      )
+      [ -z "$pattern" ] && return 0
+    fi
 
-    [ -z "$pattern" ] && return 0
+    _dddrun_run_selected "$file" "$pattern" "$init_content" "$use_section_fzf" 0 1
+    return $?
   fi
 
-  local cmd=$(_dddrun_block_get "$file" "$pattern")
-  [ -z "$cmd" ] && { echo "❌ 未找到匹配 '$pattern' 的指令。"; return 1; }
+  while true; do
+    if [ -n "$cached_pattern" ]; then
+      pattern="$cached_pattern"
+    elif [ -z "$pattern" ]; then
+      [ -z "$all_configs" ] && { printf_color "red" "🛑 ${BLOCKS[2]} 索引为空！请先使用 -f 刷新"; return 1; }
+      pattern=$({ echo "$history_cmds"; echo "$all_configs"; } | awk 'NF && !vis[$0]++' | "$DDDRUN_FZF" \
+        --height 80% --reverse --border --no-sort --query "$input_arg" \
+        --header "🎯 选择操作 (ESC 退出)" --preview-window "bottom:8:wrap" \
+        --preview "
+            $(declare -f _dddrun_block_locate);
+            $(declare -f _dddrun_block_get);
+            _dddrun_block_get $file {}
+        "
+      )
+      [ -z "$pattern" ] && return 0
+      cached_pattern="$pattern"
+    else
+      cached_pattern="$pattern"
+    fi
 
-  # 选中后即写入历史，不再依赖执行结果。
-  local old_history=$(_dddrun_block_get "$file" "${BLOCKS[3]}")
-  local new_history=$( (echo "$pattern"; echo "$old_history") | awk 'NF && !vis[$0]++' )
-  echo "$new_history" | _dddrun_block_set "$file" "${BLOCKS[3]}"
+    local write_history=0 gate_rc=0
+    [ "$history_written" -eq 0 ] && write_history=1
 
-  _dddrun_execute_with_sections "$init_content" "$cmd" "$use_section_fzf"
-  local exec_rc=$?
+    while true; do
+      _dddrun_run_selected "$file" "$pattern" "$init_content" "$use_section_fzf" 1 "$write_history"
+      local exec_rc=$?
+      history_written=1
+      [ "$exec_rc" -eq 130 ] && return 130
+      [ "$exec_rc" -ne 0 ] && [ "$exec_rc" -ne 2 ] && return "$exec_rc"
 
-  case "$exec_rc" in
-    0) printf_color "green" "✅ 命令执行成功";;
-    2) printf_color "yellow" "⏭️ 所有功能区均被跳过，未执行任何命令" ;;
-    130) printf_color "red" "🛑 用户终止执行"; return 130 ;;
-    *) return "$exec_rc" ;;
-  esac
+      if [ "$use_section_fzf" -eq 0 ]; then
+        break
+      fi
+
+      _dddrun_repeat_gate "$use_section_fzf"
+      gate_rc=$?
+      case "$gate_rc" in
+        0) break ;;
+        1) unset _DDDRUN_CACHED_SECTION_PICK; continue ;;
+        130) return 130 ;;
+      esac
+    done
+
+    printf_color "cyan" "🔁 继续重复: $pattern (Ctrl+C 退出)"
+    echo
+  done
 }
 
 _dddrun_dispatch() {
@@ -386,38 +479,60 @@ _dddrun_dispatch() {
   shift
 
   local fzf_flag=0
-  local -a actions=()
-  local arg i ch
+  local repeat_flag=0
+  local has_load=0
+  local -a meta_actions=()
+  local -a query_parts=()
+  local arg i ch m rc
 
   for arg in "$@"; do
     if [[ "$arg" =~ ^-[a-zA-Z]{2,}$ ]]; then
       for (( i=1; i<${#arg}; i++ )); do
         ch="${arg:$i:1}"
-        if [ "$ch" = "s" ]; then
-          fzf_flag=1
-        else
-          actions+=("-$ch")
-        fi
+        case "$ch" in
+          s) fzf_flag=1 ;;
+          r) repeat_flag=1 ;;
+          l) has_load=1; meta_actions+=("-l") ;;
+          *) meta_actions+=("-$ch") ;;
+        esac
       done
-    elif [ "$arg" = "-s" ]; then
-      fzf_flag=1
+    elif [[ "$arg" == -* ]]; then
+      case "$arg" in
+        -s) fzf_flag=1 ;;
+        -r) repeat_flag=1 ;;
+        -l) has_load=1; meta_actions+=("-l") ;;
+        *) meta_actions+=("$arg") ;;
+      esac
     else
-      actions+=("$arg")
+      query_parts+=("$arg")
     fi
   done
 
-  if [ "${#actions[@]}" -eq 0 ]; then
-    _dddrun_core "$file" "" "$fzf_flag"
+  for m in "${meta_actions[@]}"; do
+    case "$m" in
+      -h|-f|-e|-c)
+        _dddrun_core "$file" "$m" "$fzf_flag" "$repeat_flag"
+        rc=$?
+        [ "$rc" -ne 0 ] && return "$rc"
+        ;;
+    esac
+  done
+
+  if [ "$has_load" -eq 1 ]; then
+    _dddrun_core "$file" "-l" "$fzf_flag" "$repeat_flag"
     return $?
   fi
 
-  local rc=0
-  for arg in "${actions[@]}"; do
-    _dddrun_core "$file" "$arg" "$fzf_flag"
-    rc=$?
-    [ "$rc" -eq 130 ] && return 130
-    [ "$rc" -ne 0 ] && return "$rc"
-  done
+  if [ "${#query_parts[@]}" -gt 0 ]; then
+    _dddrun_core "$file" "${query_parts[*]}" "$fzf_flag" "$repeat_flag"
+    return $?
+  fi
+
+  if [ "${#meta_actions[@]}" -eq 0 ]; then
+    _dddrun_core "$file" "" "$fzf_flag" "$repeat_flag"
+    return $?
+  fi
+
   return 0
 }
 
