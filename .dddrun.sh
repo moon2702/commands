@@ -6,6 +6,9 @@ _DDDRUN_SH_LOADED=1
 # 路径配置（可按需修改）
 DDDRUN_FZF=/usr/bin/fzf
 DDDRUN_GLOBAL_COMMANDS="$HOME/.commands"
+DDDRUN_ENABLE_SAFE_EVAL="${DDDRUN_ENABLE_SAFE_EVAL:-0}"
+DDDRUN_ENABLE_DUPLICATE_TAG_CHECK="${DDDRUN_ENABLE_DUPLICATE_TAG_CHECK:-0}"
+DDDRUN_COMMANDS_PATH_MODE="${DDDRUN_COMMANDS_PATH_MODE:-legacy}"
 
 declare -A COLORS=(
   ["red"]="\033[1;31m"
@@ -18,22 +21,20 @@ declare -A COLORS=(
   ["reset"]="\033[0m"
 )
 
+## 按颜色输出统一格式消息。
 printf_color() {
-  local color_name=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-  local message="$2"
-  local color_code="${COLORS[$color_name]}"
-
-  if [[ -z "$color_code" ]]; then
-    color_code="${COLORS["white"]}"
-  fi
-
+  local color_name message color_code
+  color_name=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+  message="$2"
+  color_code="${COLORS[$color_name]}"
+  [[ -z "$color_code" ]] && color_code="${COLORS["white"]}"
   echo -e "${color_code}${message}${COLORS["reset"]}"
 }
 
+## 定位指定块头在文件中的起止行号。
 _dddrun_block_locate() {
   local file="$1"
   local tag="# $2"
-
   read -r s e exists < <(awk -v t="$tag" '
       $0 == t { s=NR; f=1; next }
       f && /^# \[/ { e=NR-1; exit }
@@ -42,25 +43,22 @@ _dddrun_block_locate() {
           else print s, (e?e:NR), 1
       }
   ' "$file")
-
   echo "$s $e $exists"
 }
 
+## 读取指定块内容并过滤空行。
 _dddrun_block_get() {
   local file="$1"
   local tag_name="$2"
   read -r s e exists < <(_dddrun_block_locate "$file" "$tag_name")
-
   [ "$exists" -eq 1 ] && [ "$e" -gt "$s" ] && sed -n "$((s + 1)),${e}p" "$file" | awk 'NF'
 }
 
+## 覆盖或追加指定块内容。
 _dddrun_block_set() {
-  local file="$1"
-  local tag_name="$2"
-  local new_content
+  local file="$1" tag_name="$2" new_content
   new_content=$(cat)
   read -r s e exists < <(_dddrun_block_locate "$file" "$tag_name")
-
   if [ "$exists" -eq 1 ]; then
     [ "$e" -gt "$s" ] && sed -i "$((s + 1)),${e}d" "$file"
     { echo "$new_content"; echo ""; } | sed -i "${s}r /dev/stdin" "$file"
@@ -77,22 +75,18 @@ declare -A BLOCKS=(
   [5]="[INIT]"
 )
 
+## 扫描并生成可执行业务块索引。
 _get_fresh_configs() {
-  local file="$1"
-  local block_list
+  local file="$1" block_list
   block_list=$(printf "%s\n" "${BLOCKS[@]}")
-
   grep "^# \[" "$file" | \
   grep -vFf <(echo "$block_list") | \
   sed 's/^# //'
 }
 
+## 逐段模式下确认是否执行当前功能区。
 _dddrun_confirm_section() {
-  local section_name="$1"
-  local section_cmd="$2"
-  local TERMINAL="/dev/tty"
-  local opt=""
-
+  local section_name="$1" section_cmd="$2" TERMINAL="/dev/tty" opt=""
   printf_color "blue" "\n📦 即将执行功能区: ${section_name}"
   # echo "$section_cmd"
   while true; do
@@ -107,10 +101,10 @@ _dddrun_confirm_section() {
   done
 }
 
+## 重复执行模式下处理继续/重选/退出。
 _dddrun_repeat_gate() {
   local use_section_fzf="$1"
   [ "$use_section_fzf" -eq 0 ] && return 0
-
   local opt="" TERMINAL="/dev/tty"
   while true; do
     read -r -n 1 -p "是否继续重复执行? [Enter/Y]继续 [q]重选功能区 [ESC]退出全部: " opt < "$TERMINAL"
@@ -124,47 +118,166 @@ _dddrun_repeat_gate() {
   done
 }
 
-_dddrun_execute_with_sections() {
-  local init_content="$1"
-  local raw_cmd="$2"
-  local use_section_fzf="${3:-0}"
-  local reuse_section_pick="${4:-0}"
+## 统一命令体执行入口（为安全模式预留）。
+_dddrun_eval_payload() {
+  local payload="$1"
+
+  if [ "$DDDRUN_ENABLE_SAFE_EVAL" -eq 1 ]; then
+    # 兼容开关预留: 当前先保持等价执行语义。
+    eval "$payload"
+    return $?
+  fi
+
+  eval "$payload"
+}
+
+## 统一处理执行返回码并更新执行标记。
+_dddrun_apply_exec_rc() {
+  local run_rc="$1"
+  local fail_message="$2"
+  local ran_flag_var="$3"
+
+  case "$run_rc" in
+    0)
+      printf -v "$ran_flag_var" '%s' 1
+      return 0
+      ;;
+    130)
+      return 130
+      ;;
+    *)
+      [ -n "$fail_message" ] && printf_color "red" "$fail_message"
+      return 1
+      ;;
+  esac
+}
+
+## 通过 fzf 从历史与索引中选择目标命令。
+_dddrun_pick_pattern() {
+  local file="$1" input_arg="$2" history_cmds="$3" all_configs="$4" pattern=""
+  [ -z "$all_configs" ] && { printf_color "red" "🛑 ${BLOCKS[2]} 索引为空！请先使用 -f 刷新"; return 1; }
+  pattern=$({ echo "$history_cmds"; echo "$all_configs"; } | awk 'NF && !vis[$0]++' | "$DDDRUN_FZF" \
+    --height 80% --reverse --border --no-sort --query "$input_arg" \
+    --header "🎯 选择操作 (ESC 退出)" --preview-window "bottom:8:wrap" \
+    --preview "
+        $(declare -f _dddrun_block_locate);
+        $(declare -f _dddrun_block_get);
+        _dddrun_block_get $file {}
+    "
+  )
+  echo "$pattern"
+}
+
+## 处理 -h/-f/-e/-c/-l 等元动作。
+_dddrun_handle_meta_action() {
+  local file="$1" action="$2" history_cmds="$3"
+  case "$action" in
+    "-h")
+      printf_color "blue" "📖 dddrun 使用帮助:"
+      cat <<EOF
+  dddrun-cmd [args]    执行当前目录下的 commands
+  dddrun-global [args] 执行全局 $DDDRUN_GLOBAL_COMMANDS
+-----------------------------------------------
+  可选参数 [args]:
+    (空)       进入 fzf 交互模式 (智能置顶历史记录)
+    -l         快速执行最后一次选择的命令
+    -e         使用 vim 编辑当前的配置文件
+    -c         清空当前配置文件的 ${BLOCKS[3]} 区块
+    -h         显示本帮助信息
+    -f         刷新 ${BLOCKS[2]} 块
+    -s         功能区多选模式 (可与 -l / [string] 组合, ESC 放弃)
+    -r         执行结束后自动重复本次选择 (Ctrl+C 退出循环)
+    -s -r      每轮结束后确认: Enter/Y 继续, q 重选功能区, ESC 退出全部
+    [string]   搜索包含该字符串的命令 并进入 fzf 交互模式
+  短选项可合并: 例如 -ls 等价 -l -s, -lr 等价 -l -r, -lsr 等价 -l -s -r (含轮次门控)
+-----------------------------------------------
+  命令内分段标签:
+    ## ${BLOCKS[5]} 名称   命令内的初始化段, 强制执行, 不询问, 不进 fzf 多选
+    ## ${BLOCKS[4]} 名称   功能区段, 询问 Y/S/N 或参与 -s 多选; 顺序执行, 失败即停
+  文件结构建议: 包含 ${BLOCKS[1]} ${BLOCKS[2]} ${BLOCKS[3]}（可选 ${BLOCKS[4]}/${BLOCKS[5]}）
+EOF
+      return 0
+      ;;
+    "-f")
+      echo "🔄 正在同步 ${BLOCKS[2]} 索引..."
+      local new_configs=$(_get_fresh_configs "$file")
+      [ -z "$new_configs" ] && { echo "⚠️ 未在文件中发现任何有效的业务指令块。"; return 1; }
+      echo "$new_configs" | _dddrun_block_set "$file" "${BLOCKS[2]}"
+      echo "✅ 索引已刷新 ($(echo "$new_configs" | wc -l) 条记录)。"
+      return 0
+      ;;
+    "-e")
+      vim "$file"
+      return 0
+      ;;
+    "-c")
+      echo "" | _dddrun_block_set "$file" "${BLOCKS[3]}"
+      echo "🧹 ${BLOCKS[3]} 块已清空"
+      return 0
+      ;;
+    "-l")
+      local latest_pattern
+      latest_pattern=$(echo "$history_cmds" | head -n 1)
+      if [ -z "$latest_pattern" ]; then
+        echo "❌ 暂无执行历史"
+        return 1
+      fi
+      echo -n "$(printf_color "yellow" "🕒 自动加载最近一次命令: ")"
+      echo "$latest_pattern"
+      return 0
+      ;;
+  esac
+  return 0
+}
+
+## 将命令体解析为 INIT/SECTION 结构。
+_dddrun_parse_sections() {
+  local raw_cmd="$1"
+  local section_names_var="$2"
+  local section_bodies_var="$3"
+  local init_names_var="$4"
+  local init_bodies_var="$5"
+
+  local -n _section_names="$section_names_var"
+  local -n _section_bodies="$section_bodies_var"
+  local -n _init_names="$init_names_var"
+  local -n _init_bodies="$init_bodies_var"
+
   local line=""
   local current_kind=""
   local current_name=""
   local current_body=""
   local outside_body=""
   local auto_index=1
-  local section_name=""
-  local section_body=""
-  local run_rc=0
-  local ran_any=0
-  local i=0
-  local -a section_names=()
-  local -a section_bodies=()
-  local -a init_names=()
-  local -a init_bodies=()
 
-  _append_section() {
+  _section_names=()
+  _section_bodies=()
+  _init_names=()
+  _init_bodies=()
+
+  ## 追加非空 SECTION 段到解析结果。
+  _dddrun_append_section() {
     local name="$1"
     local body="$2"
     [[ -z "${body//[[:space:]]/}" ]] && return 0
-    section_names+=("$name")
-    section_bodies+=("$body")
+    _section_names+=("$name")
+    _section_bodies+=("$body")
   }
 
-  _append_init() {
+  ## 追加非空 INIT 段到解析结果。
+  _dddrun_append_init() {
     local name="$1"
     local body="$2"
     [[ -z "${body//[[:space:]]/}" ]] && return 0
-    init_names+=("$name")
-    init_bodies+=("$body")
+    _init_names+=("$name")
+    _init_bodies+=("$body")
   }
 
-  _flush_current() {
+  ## 在状态切换时提交当前段内容。
+  _dddrun_flush_current() {
     case "$current_kind" in
-      SECTION) _append_section "$current_name" "$current_body" ;;
-      INIT)    _append_init    "$current_name" "$current_body" ;;
+      SECTION) _dddrun_append_section "$current_name" "$current_body" ;;
+      INIT) _dddrun_append_init "$current_name" "$current_body" ;;
     esac
   }
 
@@ -173,11 +286,11 @@ _dddrun_execute_with_sections() {
       local _kind="${BASH_REMATCH[1]}"
       local _rest="${BASH_REMATCH[2]}"
 
-      _flush_current
+      _dddrun_flush_current
       [ "$current_kind" = "SECTION" ] && auto_index=$((auto_index + 1))
 
       if [[ -n "${outside_body//[[:space:]]/}" ]]; then
-        _append_section "未标记区块-${auto_index}" "$outside_body"
+        _dddrun_append_section "未标记区块-${auto_index}" "$outside_body"
         auto_index=$((auto_index + 1))
         outside_body=""
       fi
@@ -187,7 +300,7 @@ _dddrun_execute_with_sections() {
         if [ "$_kind" = "SECTION" ]; then
           current_name="功能区-${auto_index}"
         else
-          current_name="初始化-$((${#init_names[@]} + 1))"
+          current_name="初始化-$((${#_init_names[@]} + 1))"
         fi
       fi
       current_body=""
@@ -204,15 +317,52 @@ _dddrun_execute_with_sections() {
     fi
   done <<< "$raw_cmd"
 
-  _flush_current
+  _dddrun_flush_current
 
   if [[ -n "${outside_body//[[:space:]]/}" ]]; then
-    _append_section "未标记区块-${auto_index}" "$outside_body"
+    _dddrun_append_section "未标记区块-${auto_index}" "$outside_body"
   fi
 
-  if [ "${#section_names[@]}" -eq 0 ] && [ "${#init_bodies[@]}" -eq 0 ]; then
-    _append_section "默认区块" "$raw_cmd"
+  if [ "${#_section_names[@]}" -eq 0 ] && [ "${#_init_bodies[@]}" -eq 0 ]; then
+    _dddrun_append_section "默认区块" "$raw_cmd"
   fi
+}
+
+## 检测重复块头并输出兼容提示。
+_dddrun_check_duplicate_headers() {
+  local file="$1"
+  local duplicated
+
+  duplicated=$(awk '
+    /^# \[/ {
+      h=$0
+      count[h]++
+      if (count[h] == 2) {
+        print substr(h, 3)
+      }
+    }
+  ' "$file")
+
+  [ -n "$duplicated" ] && printf_color "yellow" "⚠️ 检测到重复块头(兼容模式仅提示): $duplicated"
+}
+
+## 按解析结果执行 INIT/SECTION 并汇总退出码。
+_dddrun_execute_with_sections() {
+  local init_content="$1"
+  local raw_cmd="$2"
+  local use_section_fzf="${3:-0}"
+  local reuse_section_pick="${4:-0}"
+  local section_name=""
+  local section_body=""
+  local run_rc=0
+  local ran_any=0
+  local i=0
+  local -a section_names=()
+  local -a section_bodies=()
+  local -a init_names=()
+  local -a init_bodies=()
+
+  _dddrun_parse_sections "$raw_cmd" section_names section_bodies init_names init_bodies
 
   local -A _selected_idx=()
   if [ "$use_section_fzf" -eq 1 ] && [ "${#section_names[@]}" -gt 0 ]; then
@@ -256,18 +406,17 @@ _dddrun_execute_with_sections() {
 
   (
     if [ -n "$init_content" ]; then
-      eval "$init_content" || exit 1
+      _dddrun_eval_payload "$init_content" || exit 1
     fi
 
     for i in "${!init_bodies[@]}"; do
       printf_color "cyan" "\n🔧 初始化: ${init_names[$i]}"
-      eval "${init_bodies[$i]}"
+      _dddrun_eval_payload "${init_bodies[$i]}"
       run_rc=$?
-      case "$run_rc" in
-        0) ran_any=1 ;;
-        130) exit 130 ;;
-        *) printf_color "red" "❌ 初始化失败: ${init_names[$i]}"; exit 1 ;;
-      esac
+      _dddrun_apply_exec_rc "$run_rc" "❌ 初始化失败: ${init_names[$i]}" ran_any
+      run_rc=$?
+      [ "$run_rc" -eq 130 ] && exit 130
+      [ "$run_rc" -ne 0 ] && exit 1
     done
 
     for i in "${!section_names[@]}"; do
@@ -280,13 +429,12 @@ _dddrun_execute_with_sections() {
           continue
         fi
         printf_color "blue" "\n📦 执行功能区: ${section_name}"
-        eval "$section_body"
+        _dddrun_eval_payload "$section_body"
         run_rc=$?
-        case "$run_rc" in
-          0) ran_any=1 ;;
-          130) exit 130 ;;
-          *) exit 1 ;;
-        esac
+        _dddrun_apply_exec_rc "$run_rc" "" ran_any
+        run_rc=$?
+        [ "$run_rc" -eq 130 ] && exit 130
+        [ "$run_rc" -ne 0 ] && exit 1
         continue
       fi
 
@@ -294,13 +442,12 @@ _dddrun_execute_with_sections() {
       run_rc=$?
       case "$run_rc" in
         0)
-          eval "$section_body"
+          _dddrun_eval_payload "$section_body"
           run_rc=$?
-          case "$run_rc" in
-            0) ran_any=1 ;;
-            130) exit 130 ;;
-            *) exit 1 ;;
-          esac
+          _dddrun_apply_exec_rc "$run_rc" "" ran_any
+          run_rc=$?
+          [ "$run_rc" -eq 130 ] && exit 130
+          [ "$run_rc" -ne 0 ] && exit 1
           ;;
         2) printf_color "yellow" "⏭️ 已跳过: ${section_name}" ;;
         130) exit 130 ;;
@@ -314,6 +461,7 @@ _dddrun_execute_with_sections() {
   return $?
 }
 
+## 执行指定命令块并按需写入历史。
 _dddrun_run_selected() {
   local file="$1"
   local pattern="$2"
@@ -343,6 +491,7 @@ _dddrun_run_selected() {
   return "$exec_rc"
 }
 
+## 主执行流程：处理输入、选择模式并调度运行。
 _dddrun_core() {
   local file="$1"
   local input_arg="$2"
@@ -351,74 +500,34 @@ _dddrun_core() {
   local pattern=""
   local cached_pattern=""
   local history_written=0
+  local pick_rc=0
   [ ! -f "$file" ] && { echo "❌ 找不到文件: $file"; return 1; }
 
   unset _DDDRUN_CACHED_SECTION_PICK
+  [ "$DDDRUN_ENABLE_DUPLICATE_TAG_CHECK" -eq 1 ] && _dddrun_check_duplicate_headers "$file"
 
   local init_content=$(_dddrun_block_get "$file" "${BLOCKS[1]}")
   local all_configs=$(_dddrun_block_get "$file" "${BLOCKS[2]}")
   local history_cmds=$(_dddrun_block_get "$file" "${BLOCKS[3]}")
 
   case "$input_arg" in
-    "-h")
-      printf_color "blue" "📖 dddrun 使用帮助:"
-      echo "  dddrun-cmd [args]    执行当前目录下的 commands"
-      echo "  dddrun-global [args] 执行全局 $DDDRUN_GLOBAL_COMMANDS"
-      echo "-----------------------------------------------"
-      echo "  可选参数 [args]:"
-      echo "    (空)       进入 fzf 交互模式 (智能置顶历史记录)"
-      echo "    -l         快速执行最后一次选择的命令"
-      echo "    -e         使用 vim 编辑当前的配置文件"
-      echo "    -c         清空当前配置文件的 ${BLOCKS[3]} 区块"
-      echo "    -h         显示本帮助信息"
-      echo "    -f         刷新 ${BLOCKS[2]} 块"
-      echo "    -s         功能区多选模式 (可与 -l / [string] 组合, ESC 放弃)"
-      echo "    -r         执行结束后自动重复本次选择 (Ctrl+C 退出循环)"
-      echo "    -s -r      每轮结束后确认: Enter/Y 继续, q 重选功能区, ESC 退出全部"
-      echo "    [string]   搜索包含该字符串的命令 并进入 fzf 交互模式"
-      echo "  短选项可合并: 例如 -ls 等价 -l -s, -lr 等价 -l -r, -lsr 等价 -l -s -r (含轮次门控)"
-      echo "-----------------------------------------------"
-      echo "  命令内分段标签:"
-      echo "    ## ${BLOCKS[5]} 名称   命令内的初始化段, 强制执行, 不询问, 不进 fzf 多选"
-      echo "    ## ${BLOCKS[4]} 名称   功能区段, 询问 Y/S/N 或参与 -s 多选; 顺序执行, 失败即停"
-      echo "  文件结构建议: 包含 ${BLOCKS[1]} ${BLOCKS[2]} ${BLOCKS[3]}（可选 ${BLOCKS[4]}/${BLOCKS[5]}）"
-      return 0
-      ;;
-    "-f")
-      echo "🔄 正在同步 ${BLOCKS[2]} 索引..."
-      local new_configs=$(_get_fresh_configs "$file")
-      [ -z "$new_configs" ] && { echo "⚠️ 未在文件中发现任何有效的业务指令块。"; return 1; }
-      echo "$new_configs" | _dddrun_block_set "$file" "${BLOCKS[2]}"
-      echo "✅ 索引已刷新 ($(echo "$new_configs" | wc -l) 条记录)。"
-      return 0
-      ;;
-    "-e") vim "$file"; return 0 ;;
-    "-c")
-      echo "" | _dddrun_block_set "$file" "${BLOCKS[3]}"
-      echo "🧹 ${BLOCKS[3]} 块已清空"
-      return 0
+    "-h"|"-f"|"-e"|"-c")
+      _dddrun_handle_meta_action "$file" "$input_arg" "$history_cmds"
+      return $?
       ;;
     "-l")
+      _dddrun_handle_meta_action "$file" "-l" "$history_cmds" || return $?
       pattern=$(echo "$history_cmds" | head -n 1)
-      if [ -z "$pattern" ]; then echo "❌ 暂无执行历史"; return 1; fi
-      echo -n "$(printf_color "yellow" "🕒 自动加载最近一次命令: ")"
-      echo "$pattern"
       ;;
-    *) ;;
+    *)
+      ;;
   esac
 
   if [ "$repeat_flag" -eq 0 ]; then
     if [ -z "$pattern" ]; then
-      [ -z "$all_configs" ] && { printf_color "red" "🛑 ${BLOCKS[2]} 索引为空！请先使用 -f 刷新"; return 1; }
-      pattern=$({ echo "$history_cmds"; echo "$all_configs"; } | awk 'NF && !vis[$0]++' | "$DDDRUN_FZF" \
-        --height 80% --reverse --border --no-sort --query "$input_arg" \
-        --header "🎯 选择操作 (ESC 退出)" --preview-window "bottom:8:wrap" \
-        --preview "
-            $(declare -f _dddrun_block_locate);
-            $(declare -f _dddrun_block_get);
-            _dddrun_block_get $file {}
-        "
-      )
+      pattern=$(_dddrun_pick_pattern "$file" "$input_arg" "$history_cmds" "$all_configs")
+      pick_rc=$?
+      [ "$pick_rc" -ne 0 ] && return "$pick_rc"
       [ -z "$pattern" ] && return 0
     fi
 
@@ -430,16 +539,9 @@ _dddrun_core() {
     if [ -n "$cached_pattern" ]; then
       pattern="$cached_pattern"
     elif [ -z "$pattern" ]; then
-      [ -z "$all_configs" ] && { printf_color "red" "🛑 ${BLOCKS[2]} 索引为空！请先使用 -f 刷新"; return 1; }
-      pattern=$({ echo "$history_cmds"; echo "$all_configs"; } | awk 'NF && !vis[$0]++' | "$DDDRUN_FZF" \
-        --height 80% --reverse --border --no-sort --query "$input_arg" \
-        --header "🎯 选择操作 (ESC 退出)" --preview-window "bottom:8:wrap" \
-        --preview "
-            $(declare -f _dddrun_block_locate);
-            $(declare -f _dddrun_block_get);
-            _dddrun_block_get $file {}
-        "
-      )
+      pattern=$(_dddrun_pick_pattern "$file" "$input_arg" "$history_cmds" "$all_configs")
+      pick_rc=$?
+      [ "$pick_rc" -ne 0 ] && return "$pick_rc"
       [ -z "$pattern" ] && return 0
       cached_pattern="$pattern"
     else
@@ -474,6 +576,7 @@ _dddrun_core() {
   done
 }
 
+## 参数分发入口：拆分 meta、query 与模式位。
 _dddrun_dispatch() {
   local file="$1"
   shift
@@ -533,13 +636,37 @@ _dddrun_dispatch() {
     return $?
   fi
 
+  # 兼容语义: 仅未知选项且无 -l/查询时，保持返回 0 且不执行。
   return 0
 }
 
-dddrun-cmd() {
-  _dddrun_dispatch "commands" "$@"
+## 解析 dddrun-cmd 使用的 commands 路径。
+_dddrun_resolve_commands_file() {
+  local mode="${DDDRUN_COMMANDS_PATH_MODE}"
+  local cwd_commands="commands"
+  local script_commands="${BASH_SOURCE[0]%/*}/commands"
+
+  case "$mode" in
+    script_first)
+      [ -f "$script_commands" ] && { echo "$script_commands"; return 0; }
+      echo "$cwd_commands"
+      return 0
+      ;;
+    legacy|*)
+      echo "$cwd_commands"
+      return 0
+      ;;
+  esac
 }
 
+## 本地入口：执行项目命令文件。
+dddrun-cmd() {
+  local commands_file
+  commands_file=$(_dddrun_resolve_commands_file)
+  _dddrun_dispatch "$commands_file" "$@"
+}
+
+## 全局入口：执行 ~/.commands。
 dddrun-global() {
   _dddrun_dispatch "$DDDRUN_GLOBAL_COMMANDS" "$@"
 }
